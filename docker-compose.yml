@@ -16,3 +16,19 @@ services:
     stdin_open: true
     tty: true
     entrypoint: ["python", "scripts/magic_formula.py", "--data-dir", "/app/dados"]
+
+  study-acquirers:
+    build: .
+    image: ic-indice-ranking
+    volumes:
+      - ./dados:/app/dados:ro
+      - ./out:/app/out
+    entrypoint:
+      [
+        "python",
+        "scripts/study_acquirers.py",
+        "--data-dir",
+        "/app/dados",
+        "--out-dir",
+        "/app/out",
+      ]

@@ -29,6 +29,7 @@ Os nomes das colunas são case-insensitive. Aceitos:
 | EBITDA | `EBITDA` | Sim (ambos) | Lucro operacional usado no yield |
 | EV | `EV` | Sim (ambos) | Enterprise Value (> 0) |
 | ROIC | `ROIC` | Só Magic Formula | Return on Invested Capital |
+| Close | `Close`, `Preco`, `Adj Close` | Só o estudo de janelas | Preço para retorno da carteira entre rebalances |
 
 ### Exemplo de planilha (`PETR4.xlsx`)
 
@@ -65,6 +66,17 @@ python scripts/magic_formula.py --data-dir ./dados --date 2024-03-15 --n 30
 ```
 
 Se `--date` ou `--n` não forem informados, o script pede via input. Se `--data-dir` for omitido, usa `./dados` (ou pergunta se a pasta não existir).
+
+### Estudo com janelas históricas (Acquirer's Multiple)
+
+Percorre o passado em rebalances mensais (`M`), trimestrais (`Q`) ou anuais (`Y`). Em cada data usa o **último fundamental disponível até aquele dia** (não exige a data exata na planilha). Sem coluna `Close`, gera só as carteiras e o turnover; com `Close`, também estima o retorno da janela e um NAV começando em `1000`.
+
+```bash
+python scripts/study_acquirers.py --data-dir ./dados --start 2020-01-01 --end 2024-12-31 --freq M --n 30 --out-dir ./out
+docker compose run --rm study-acquirers --start 2020-01-01 --end 2024-12-31 --freq M --n 30
+```
+
+`--max-age-days 180` descarta EBITDA/EV mais velhos que isso na data do rebalance. Os CSVs `out/holdings.csv` e `out/summary.csv` listam a carteira de cada janela.
 
 ## Docker
 
