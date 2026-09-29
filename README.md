@@ -66,6 +66,26 @@ python scripts/magic_formula.py --data-dir ./dados --date 2024-03-15 --n 30
 
 Se `--date` ou `--n` não forem informados, o script pede via input. Se `--data-dir` for omitido, usa `./dados` (ou pergunta se a pasta não existir).
 
+## Docker
+
+Coloque os arquivos `.xlsx` em `./dados` (montada no container). Sem `--date` ou `--n`, o Compose abre o prompt interativo.
+
+```bash
+docker compose build
+docker compose run --rm acquirers --date 2024-03-15 --n 30
+docker compose run --rm magic-formula --date 2024-03-15 --n 30
+```
+
+Sem Compose:
+
+```bash
+docker build -t ic-indice-ranking .
+docker run --rm -v "$(pwd)/dados:/app/dados:ro" ic-indice-ranking --date 2024-03-15 --n 30
+docker run --rm -v "$(pwd)/dados:/app/dados:ro" \
+  --entrypoint python ic-indice-ranking \
+  scripts/magic_formula.py --data-dir /app/dados --date 2024-03-15 --n 30
+```
+
 ### Saída
 
 Lista de tuplas `(ativo, nota, peso)`:

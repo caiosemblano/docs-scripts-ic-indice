@@ -1,0 +1,18 @@
+services:
+  acquirers:
+    build: .
+    image: ic-indice-ranking
+    volumes:
+      - ./dados:/app/dados:ro
+    stdin_open: true
+    tty: true
+    entrypoint: ["python", "scripts/acquirers_multiple.py", "--data-dir", "/app/dados"]
+
+  magic-formula:
+    build: .
+    image: ic-indice-ranking
+    volumes:
+      - ./dados:/app/dados:ro
+    stdin_open: true
+    tty: true
+    entrypoint: ["python", "scripts/magic_formula.py", "--data-dir", "/app/dados"]
