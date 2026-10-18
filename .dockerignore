@@ -12,3 +12,6 @@ LICENSE
 Dockerfile
 docker-compose.yml
 .dockerignore
+.streamlit
+.python-version
+

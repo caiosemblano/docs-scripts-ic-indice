@@ -6,9 +6,15 @@ import argparse
 import sys
 from datetime import date, datetime
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, NamedTuple
 
 import pandas as pd
+
+
+class RankingResult(NamedTuple):
+    table: pd.DataFrame
+    n_valid: int
+
 
 DATE_ALIASES = {"date", "data"}
 COLUMN_ALIASES = {
@@ -41,6 +47,40 @@ def _parse_date(value: str | date | datetime) -> date:
     if isinstance(value, date):
         return value
     return datetime.strptime(str(value).strip(), "%Y-%m-%d").date()
+
+
+def _emit_warning(message: str, warnings: list[str] | None) -> None:
+    if warnings is not None:
+        warnings.append(message)
+        return
+    print(message, file=sys.stderr)
+
+
+def list_xlsx_files(data_dir: Path) -> list[Path]:
+    return sorted(data_dir.glob("*.xlsx"))
+
+
+def inspect_data_dir(data_dir: Path) -> tuple[list[Path], list[date]]:
+    """List ``*.xlsx`` files and the unique dates found across them."""
+    if not data_dir.is_dir():
+        raise FileNotFoundError(f"Data directory not found: {data_dir}")
+
+    paths = list_xlsx_files(data_dir)
+    found: set[date] = set()
+    for path in paths:
+        try:
+            raw = pd.read_excel(path, engine="openpyxl")
+        except Exception:  # noqa: BLE001 - skip unreadable files during discovery
+            continue
+
+        df = _normalize_columns(raw)
+        if "Date" not in df.columns:
+            continue
+
+        parsed = pd.to_datetime(df["Date"], errors="coerce").dt.date.dropna()
+        found.update(parsed.tolist())
+
+    return paths, sorted(found)
 
 
 def parse_args_or_prompt(
@@ -113,9 +153,10 @@ def load_universe(
     as_of: date,
     *,
     require_roic: bool = False,
+    warnings: list[str] | None = None,
 ) -> pd.DataFrame:
     """Load one row per asset for ``as_of`` from each ``*.xlsx`` in ``data_dir``."""
-    paths = sorted(data_dir.glob("*.xlsx"))
+    paths = list_xlsx_files(data_dir)
     if not paths:
         raise FileNotFoundError(f"No .xlsx files found in {data_dir}")
 
@@ -129,21 +170,24 @@ def load_universe(
         try:
             raw = pd.read_excel(path, engine="openpyxl")
         except Exception as exc:  # noqa: BLE001 - surface file-level failures
-            print(f"Warning: failed to read {path.name}: {exc}", file=sys.stderr)
+            _emit_warning(f"Warning: failed to read {path.name}: {exc}", warnings)
             continue
 
         df = _normalize_columns(raw)
         missing = [c for c in ["Date", *required] if c not in df.columns]
         if missing:
-            print(
+            _emit_warning(
                 f"Warning: {path.name} missing columns {missing}; skipped",
-                file=sys.stderr,
+                warnings,
             )
             continue
 
         row = _row_for_date(df, as_of)
         if row is None:
-            print(f"Warning: {asset} has no row for {as_of.isoformat()}; skipped", file=sys.stderr)
+            _emit_warning(
+                f"Warning: {asset} has no row for {as_of.isoformat()}; skipped",
+                warnings,
+            )
             continue
 
         record: dict[str, object] = {"ativo": asset}
@@ -151,7 +195,10 @@ def load_universe(
         for col in required:
             value = pd.to_numeric(row[col], errors="coerce")
             if pd.isna(value):
-                print(f"Warning: {asset} has invalid {col} on {as_of.isoformat()}; skipped", file=sys.stderr)
+                _emit_warning(
+                    f"Warning: {asset} has invalid {col} on {as_of.isoformat()}; skipped",
+                    warnings,
+                )
                 valid = False
                 break
             record[col] = float(value)
@@ -160,7 +207,10 @@ def load_universe(
             continue
 
         if float(record["EV"]) <= 0:
-            print(f"Warning: {asset} has EV <= 0 on {as_of.isoformat()}; skipped", file=sys.stderr)
+            _emit_warning(
+                f"Warning: {asset} has EV <= 0 on {as_of.isoformat()}; skipped",
+                warnings,
+            )
             continue
 
         rows.append(record)
@@ -180,3 +230,11 @@ def to_portfolio(
         return []
     weight = equal_weight(len(selected))
     return [(name, score, weight) for name, score in selected]
+
+
+def table_to_portfolio(table: pd.DataFrame) -> list[tuple[str, float, float]]:
+    if table.empty:
+        return []
+    return list(
+        table[["ativo", "nota", "peso"]].itertuples(index=False, name=None),
+    )

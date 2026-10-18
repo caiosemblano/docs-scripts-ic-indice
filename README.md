@@ -1,6 +1,6 @@
 # Ranking de carteiras — Acquirer's Multiple e Magic Formula
 
-Scripts que leem vários arquivos Excel (um por ativo), filtram por uma data e montam uma carteira com pesos iguais.
+Aplicação que lê vários arquivos Excel (um por ativo), filtra por uma data e monta uma carteira com pesos iguais. Há uma interface web em Streamlit e os scripts de linha de comando originais.
 
 ## Formato dos dados (Excel)
 
@@ -39,57 +39,76 @@ Os nomes das colunas são case-insensitive. Aceitos:
 | 2024-03-18 | 100000 | 505000  | 0.19 |
 
 - Use **uma linha por dia**.
-- A data passada na CLI (`--date`) precisa existir exatamente nesse arquivo; caso contrário o ativo é ignorado.
-- Valores inválidos, nulos ou `EV <= 0` fazem o ativo ser descartado (com aviso no stderr).
+- A data de referência precisa existir exatamente nesse arquivo; caso contrário o ativo é ignorado.
+- Valores inválidos, nulos ou `EV <= 0` fazem o ativo ser descartado (com aviso).
 
-### O que cada script usa
+### O que cada estratégia usa
 
-| Script | Métricas | Nota (`nota`) | Ranking |
-|--------|----------|---------------|---------|
+| Estratégia | Métricas | Nota (`nota`) | Ranking |
+|------------|----------|---------------|---------|
 | Acquirer's Multiple | `EBITDA`, `EV` | `EBITDA / EV` (maior = melhor) | Top N pelo yield |
 | Magic Formula | `EBITDA`, `EV`, `ROIC` | Soma dos ranks de yield e ROIC (menor = melhor) | Top N pelo rank combinado |
 
-Em ambos, o **peso** de cada ativo na carteira é `1/n` (pesos iguais).
+Em ambos, o **peso** de cada ativo na carteira é `1/n` (pesos iguais). A seleção por janela de tempo (data inicial e final) está fora do escopo atual; a interface já reserva esse modo para uma evolução futura.
 
 ## Instalação
 
+Gerencie o ambiente com [uv](https://docs.astral.sh/uv/):
+
 ```bash
-pip install -r requirements.txt
+uv sync
 ```
 
-## Uso
+## Interface web
 
 ```bash
-python scripts/acquirers_multiple.py --data-dir ./dados --date 2024-03-15 --n 30
-python scripts/magic_formula.py --data-dir ./dados --date 2024-03-15 --n 30
+uv run streamlit run app.py
+```
+
+Abre em `http://localhost:8501`. Na barra lateral você escolhe:
+
+- o diretório dos arquivos `.xlsx`
+- a estratégia (Acquirer's Multiple, Magic Formula ou as duas)
+- a data de referência
+- o número de ações na carteira (`n`)
+
+A área principal mostra métricas, a tabela da carteira, exportação em CSV e os avisos de ativos descartados.
+
+## CLI
+
+```bash
+uv run python scripts/acquirers_multiple.py --data-dir ./dados --date 2024-03-15 --n 30
+uv run python scripts/magic_formula.py --data-dir ./dados --date 2024-03-15 --n 30
 ```
 
 Se `--date` ou `--n` não forem informados, o script pede via input. Se `--data-dir` for omitido, usa `./dados` (ou pergunta se a pasta não existir).
 
-## Docker
-
-Coloque os arquivos `.xlsx` em `./dados` (montada no container). Sem `--date` ou `--n`, o Compose abre o prompt interativo.
-
-```bash
-docker compose build
-docker compose run --rm acquirers --date 2024-03-15 --n 30
-docker compose run --rm magic-formula --date 2024-03-15 --n 30
-```
-
-Sem Compose:
-
-```bash
-docker build -t ic-indice-ranking .
-docker run --rm -v "$(pwd)/dados:/app/dados:ro" ic-indice-ranking --date 2024-03-15 --n 30
-docker run --rm -v "$(pwd)/dados:/app/dados:ro" \
-  --entrypoint python ic-indice-ranking \
-  scripts/magic_formula.py --data-dir /app/dados --date 2024-03-15 --n 30
-```
-
-### Saída
+### Saída da CLI
 
 Lista de tuplas `(ativo, nota, peso)`:
 
 ```python
 [('BBB', 0.4, 0.3333333333333333), ('DDD', 0.3, 0.3333333333333333), ('AAA', 0.2, 0.3333333333333333)]
+```
+
+## Docker
+
+Coloque os arquivos `.xlsx` em `./dados` (montada no container).
+
+```bash
+docker build -t ic-indice-ranking .
+docker run --rm -p 8501:8501 -v "$(pwd)/dados:/app/dados:ro" ic-indice-ranking
+```
+
+Para os scripts CLI:
+
+```bash
+docker run --rm -v "$(pwd)/dados:/app/dados:ro" \
+  --entrypoint uv ic-indice-ranking \
+  run --frozen --no-dev --no-sync python scripts/acquirers_multiple.py \
+  --data-dir /app/dados --date 2024-03-15 --n 30
+docker run --rm -v "$(pwd)/dados:/app/dados:ro" \
+  --entrypoint uv ic-indice-ranking \
+  run --frozen --no-dev --no-sync python scripts/magic_formula.py \
+  --data-dir /app/dados --date 2024-03-15 --n 30
 ```
