@@ -9,19 +9,12 @@ from pathlib import Path
 from typing import Iterable, NamedTuple
 
 import pandas as pd
+from economatica import map_economatica_columns, read_economatica_xlsx
 
 
 class RankingResult(NamedTuple):
     table: pd.DataFrame
     n_valid: int
-
-
-DATE_ALIASES = {"date", "data"}
-COLUMN_ALIASES = {
-    "ebitda": "EBITDA",
-    "ev": "EV",
-    "roic": "ROIC",
-}
 
 
 def equal_weight(n: int) -> float:
@@ -31,14 +24,8 @@ def equal_weight(n: int) -> float:
 
 
 def _normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
-    rename: dict[str, str] = {}
-    for col in df.columns:
-        key = str(col).strip().lower()
-        if key in DATE_ALIASES:
-            rename[col] = "Date"
-        elif key in COLUMN_ALIASES:
-            rename[col] = COLUMN_ALIASES[key]
-    return df.rename(columns=rename)
+    """Map exact names and Economatica prefixes (EBITDA/EV/ROIC) to canonical columns."""
+    return map_economatica_columns(df)
 
 
 def _parse_date(value: str | date | datetime) -> date:
@@ -69,11 +56,10 @@ def inspect_data_dir(data_dir: Path) -> tuple[list[Path], list[date]]:
     found: set[date] = set()
     for path in paths:
         try:
-            raw = pd.read_excel(path, engine="openpyxl")
+            df = _normalize_columns(read_economatica_xlsx(path))
         except Exception:  # noqa: BLE001 - skip unreadable files during discovery
             continue
 
-        df = _normalize_columns(raw)
         if "Date" not in df.columns:
             continue
 
@@ -168,12 +154,10 @@ def load_universe(
     for path in paths:
         asset = path.stem
         try:
-            raw = pd.read_excel(path, engine="openpyxl")
+            df = _normalize_columns(read_economatica_xlsx(path))
         except Exception as exc:  # noqa: BLE001 - surface file-level failures
             _emit_warning(f"Warning: failed to read {path.name}: {exc}", warnings)
             continue
-
-        df = _normalize_columns(raw)
         missing = [c for c in ["Date", *required] if c not in df.columns]
         if missing:
             _emit_warning(

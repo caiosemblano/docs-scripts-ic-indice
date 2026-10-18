@@ -11,6 +11,8 @@ Aplicação que lê vários arquivos Excel (um por ativo), filtra por uma data e
   - Exemplo: `PETR4.xlsx` → ativo `PETR4`
 - Dentro de cada arquivo: **indicadores nas colunas**, **datas nas linhas** (uma linha por dia).
 
+Exports da Economatica (nome da empresa na primeira linha, cabeçalho multilinha com unidades) são lidos **em memória** e mapeados para as colunas abaixo. Os arquivos em `dados/` **não são alterados**. Detalhes do layout e do mapeamento: [docs/economatica.md](docs/economatica.md).
+
 ```
 dados/
   PETR4.xlsx
