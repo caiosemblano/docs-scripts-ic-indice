@@ -8,9 +8,9 @@ from pathlib import Path
 import pandas as pd
 from common import (
     RankingResult,
-    equal_weight,
     load_universe,
     parse_args_or_prompt,
+    score_weights,
     table_to_portfolio,
 )
 
@@ -47,7 +47,7 @@ def magic_formula_table(
         return RankingResult(table=empty, n_valid=len(universe))
 
     selected.insert(0, "posicao", range(1, len(selected) + 1))
-    selected["peso"] = equal_weight(len(selected))
+    selected["peso"] = score_weights(selected["nota"], higher_is_better=False)
     table = selected[["posicao", "ativo", "EBITDA", "EV", "ROIC", "nota", "peso"]].reset_index(
         drop=True,
     )
@@ -64,7 +64,7 @@ def rank_magic_formula(
     Returns
     -------
     list[tuple[str, float, float]]
-        (asset_name, combined_rank_nota, weight)
+        (asset_name, combined_rank_nota, weight proportional to 1/nota)
     """
     return table_to_portfolio(magic_formula_table(data_dir, as_of, n).table)
 

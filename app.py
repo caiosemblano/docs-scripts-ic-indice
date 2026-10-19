@@ -22,6 +22,8 @@ STRATEGY_ACQUIRERS = "Acquirer's Multiple"
 STRATEGY_MAGIC = "Magic Formula"
 STRATEGY_BOTH = "Comparar ambas"
 DEFAULT_DATA_DIR = "./dados"
+# Bump when ranking or weighting logic changes so @st.cache_data discards stale tables.
+RANKING_LOGIC_VERSION = 2
 COLUMN_LABELS = {
     "posicao": "Posição",
     "ativo": "Ativo",
@@ -90,8 +92,9 @@ def run_ranking(
     as_of: str,
     n: int,
     signature: str,
+    logic_version: int,
 ) -> tuple[pd.DataFrame, int, list[str]]:
-    del signature
+    del signature, logic_version
     warnings: list[str] = []
     if strategy == STRATEGY_MAGIC:
         result = magic_formula_table(data_dir, as_of, n, warnings=warnings)
@@ -126,12 +129,12 @@ def render_portfolio(
 ) -> None:
     st.subheader(title)
     selected = len(table)
-    weight = float(table["peso"].iloc[0]) if selected else 0.0
+    max_weight = float(table["peso"].max()) if selected else 0.0
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Arquivos .xlsx", n_files)
     c2.metric("Ativos válidos", n_valid)
     c3.metric("Selecionados (n)", selected)
-    c4.metric("Peso igualitário", f"{weight:.2%}")
+    c4.metric("Maior peso", f"{max_weight:.2%}")
 
     if table.empty:
         st.info("Nenhum ativo selecionado para os parâmetros atuais.")
@@ -164,7 +167,7 @@ def main() -> None:
     st.set_page_config(page_title="Ranking de carteiras", layout="wide")
     st.title("Ranking de carteiras")
     st.caption(
-        "Monte uma carteira de pesos iguais a partir de planilhas Excel "
+        "Monte uma carteira ponderada pela nota a partir de planilhas Excel "
         "(Acquirer's Multiple ou Magic Formula)."
     )
 
@@ -234,6 +237,10 @@ def main() -> None:
             min_value=min_date,
             max_value=max_date,
             key=f"as_of_{data_dir.resolve()}",
+            help=(
+                "EBITDA, EV e ROIC da Economatica saem em fim de trimestre. "
+                "O ranking usa o último valor disponível até esta data."
+            ),
         )
         max_n = max(1, n_files)
         n = int(
@@ -268,7 +275,14 @@ def main() -> None:
     if len(strategies) == 1:
         name = strategies[0]
         try:
-            table, n_valid, warnings = run_ranking(name, str(data_dir), as_of_iso, n, signature)
+            table, n_valid, warnings = run_ranking(
+                name,
+                str(data_dir),
+                as_of_iso,
+                n,
+                signature,
+                RANKING_LOGIC_VERSION,
+            )
         except (FileNotFoundError, ValueError) as exc:
             st.error(str(exc))
             st.stop()
@@ -285,6 +299,7 @@ def main() -> None:
                     as_of_iso,
                     n,
                     signature,
+                    RANKING_LOGIC_VERSION,
                 )
             except (FileNotFoundError, ValueError) as exc:
                 st.error(str(exc))

@@ -23,6 +23,35 @@ def equal_weight(n: int) -> float:
     return 1.0 / n
 
 
+def score_weights(
+    scores: Iterable[float],
+    *,
+    higher_is_better: bool = True,
+) -> list[float]:
+    """Return weights proportional to each score; they always sum to 1.
+
+    For rankings where a lower score is better (Magic Formula combined rank),
+    pass ``higher_is_better=False`` so weight is proportional to ``1/score``.
+    Non-positive contributions (e.g. negative earnings yield) are clipped to 0.
+    If every contribution is 0, fall back to equal weights.
+    """
+    values = [float(score) for score in scores]
+    n = len(values)
+    if n == 0:
+        return []
+
+    if higher_is_better:
+        raw = values
+    else:
+        raw = [1.0 / score if score != 0 else 0.0 for score in values]
+
+    clipped = [score if score > 0 else 0.0 for score in raw]
+    total = sum(clipped)
+    if total <= 0:
+        return [equal_weight(n)] * n
+    return [score / total for score in clipped]
+
+
 def _normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
     """Map exact names and Economatica prefixes (EBITDA/EV/ROIC) to canonical columns."""
     return map_economatica_columns(df)
@@ -123,15 +152,40 @@ def parse_args_or_prompt(
     return data_dir, as_of, n
 
 
-def _row_for_date(df: pd.DataFrame, as_of: date) -> pd.Series | None:
+def _row_as_of(
+    df: pd.DataFrame,
+    as_of: date,
+    required: list[str],
+) -> pd.Series | None:
+    """Return the latest row on or before ``as_of`` with valid ``required`` metrics.
+
+    Economatica fills EBITDA/EV/ROIC mainly on quarter-ends and leaves ``-`` on
+    other days, so an exact-date match would drop every asset on a date like
+    2026-10-13.
+    """
     if "Date" not in df.columns:
         return None
 
-    dates = pd.to_datetime(df["Date"], errors="coerce").dt.date
-    matched = df.loc[dates == as_of]
-    if matched.empty:
+    work = df.copy()
+    work["_as_of"] = pd.to_datetime(work["Date"], errors="coerce").dt.date
+    work = work.loc[work["_as_of"].notna() & (work["_as_of"] <= as_of)]
+    if work.empty:
         return None
-    return matched.iloc[-1]
+
+    for col in required:
+        if col not in work.columns:
+            return None
+        work[col] = pd.to_numeric(work[col], errors="coerce")
+
+    usable = work[required].notna().all(axis=1)
+    if "EV" in required:
+        usable &= work["EV"] > 0
+    work = work.loc[usable]
+    if work.empty:
+        return None
+
+    latest = work.sort_values("_as_of").iloc[-1]
+    return latest.drop(labels=["_as_of"], errors="ignore")
 
 
 def load_universe(
@@ -166,10 +220,11 @@ def load_universe(
             )
             continue
 
-        row = _row_for_date(df, as_of)
+        row = _row_as_of(df, as_of, required)
         if row is None:
             _emit_warning(
-                f"Warning: {asset} has no row for {as_of.isoformat()}; skipped",
+                f"Warning: {asset} has no valid {'/'.join(required)} "
+                f"on or before {as_of.isoformat()}; skipped",
                 warnings,
             )
             continue
@@ -208,12 +263,20 @@ def load_universe(
 def to_portfolio(
     ranked: Iterable[tuple[str, float]],
     n: int,
+    *,
+    higher_is_better: bool = True,
 ) -> list[tuple[str, float, float]]:
     selected = list(ranked)[:n]
     if not selected:
         return []
-    weight = equal_weight(len(selected))
-    return [(name, score, weight) for name, score in selected]
+    weights = score_weights(
+        [score for _, score in selected],
+        higher_is_better=higher_is_better,
+    )
+    return [
+        (name, score, weight)
+        for (name, score), weight in zip(selected, weights, strict=True)
+    ]
 
 
 def table_to_portfolio(table: pd.DataFrame) -> list[tuple[str, float, float]]:

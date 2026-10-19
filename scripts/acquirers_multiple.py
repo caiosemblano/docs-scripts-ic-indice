@@ -8,9 +8,9 @@ from pathlib import Path
 import pandas as pd
 from common import (
     RankingResult,
-    equal_weight,
     load_universe,
     parse_args_or_prompt,
+    score_weights,
     table_to_portfolio,
 )
 
@@ -28,7 +28,7 @@ def acquirers_multiple_table(
     *,
     warnings: list[str] | None = None,
 ) -> RankingResult:
-    """Rank assets by EBITDA/EV and return the equal-weighted top N as a table."""
+    """Rank assets by EBITDA/EV and return the score-weighted top N as a table."""
     as_of = _as_of_date(as_of)
     universe = load_universe(
         Path(data_dir),
@@ -44,7 +44,7 @@ def acquirers_multiple_table(
         return RankingResult(table=empty, n_valid=len(universe))
 
     selected.insert(0, "posicao", range(1, len(selected) + 1))
-    selected["peso"] = equal_weight(len(selected))
+    selected["peso"] = score_weights(selected["nota"], higher_is_better=True)
     table = selected[["posicao", "ativo", "EBITDA", "EV", "nota", "peso"]].reset_index(drop=True)
     return RankingResult(table=table, n_valid=len(universe))
 
@@ -54,12 +54,12 @@ def rank_acquirers_multiple(
     as_of: date | str,
     n: int,
 ) -> list[tuple[str, float, float]]:
-    """Rank assets by EBITDA/EV (higher is better) and return equal-weighted top N.
+    """Rank assets by EBITDA/EV (higher is better) and return score-weighted top N.
 
     Returns
     -------
     list[tuple[str, float, float]]
-        (asset_name, earnings_yield_nota, weight)
+        (asset_name, earnings_yield_nota, weight proportional to nota)
     """
     return table_to_portfolio(acquirers_multiple_table(data_dir, as_of, n).table)
 

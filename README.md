@@ -1,6 +1,6 @@
 # Ranking de carteiras — Acquirer's Multiple e Magic Formula
 
-Aplicação que lê vários arquivos Excel (um por ativo), filtra por uma data e monta uma carteira com pesos iguais. Há uma interface web em Streamlit e os scripts de linha de comando originais.
+Aplicação que lê vários arquivos Excel (um por ativo), filtra por uma data e monta uma carteira com pesos proporcionais à nota. Há uma interface web em Streamlit e os scripts de linha de comando originais.
 
 ## Formato dos dados (Excel)
 
@@ -41,8 +41,8 @@ Os nomes das colunas são case-insensitive. Aceitos:
 | 2024-03-18 | 100000 | 505000  | 0.19 |
 
 - Use **uma linha por dia**.
-- A data de referência precisa existir exatamente nesse arquivo; caso contrário o ativo é ignorado.
-- Valores inválidos, nulos ou `EV <= 0` fazem o ativo ser descartado (com aviso).
+- Para cada ativo, o ranking usa o **último valor válido** de EBITDA/EV (e ROIC, na Magic Formula) **em ou antes** da data de referência. Na Economatica esses campos costumam vir só no fim do trimestre; nos outros dias o export traz `-`.
+- Se não houver nenhum valor válido até a data, ou se `EV <= 0`, o ativo é descartado (com aviso).
 
 ### O que cada estratégia usa
 
@@ -51,7 +51,12 @@ Os nomes das colunas são case-insensitive. Aceitos:
 | Acquirer's Multiple | `EBITDA`, `EV` | `EBITDA / EV` (maior = melhor) | Top N pelo yield |
 | Magic Formula | `EBITDA`, `EV`, `ROIC` | Soma dos ranks de yield e ROIC (menor = melhor) | Top N pelo rank combinado |
 
-Em ambos, o **peso** de cada ativo na carteira é `1/n` (pesos iguais). A seleção por janela de tempo (data inicial e final) está fora do escopo atual; a interface já reserva esse modo para uma evolução futura.
+O **peso** de cada ativo é proporcional à nota na carteira selecionada (os pesos somam 1):
+
+- Acquirer's Multiple: `peso = nota / soma(notas)` (maior yield recebe mais peso).
+- Magic Formula: `peso = (1/nota) / soma(1/notas)` (menor rank combinado recebe mais peso).
+
+Notas não positivas (por exemplo, yield negativo) ficam com peso 0. Se todas as contribuições forem 0, a carteira cai para pesos iguais `1/n`. A seleção por janela de tempo (data inicial e final) está fora do escopo atual; a interface já reserva esse modo para uma evolução futura.
 
 ## Instalação
 
@@ -90,7 +95,7 @@ Se `--date` ou `--n` não forem informados, o script pede via input. Se `--data-
 Lista de tuplas `(ativo, nota, peso)`:
 
 ```python
-[('BBB', 0.4, 0.3333333333333333), ('DDD', 0.3, 0.3333333333333333), ('AAA', 0.2, 0.3333333333333333)]
+[('BBB', 0.4, 0.4444444444444444), ('DDD', 0.3, 0.3333333333333333), ('AAA', 0.2, 0.2222222222222222)]
 ```
 
 ## Docker

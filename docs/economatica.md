@@ -35,7 +35,7 @@ O traço `-` da Economatica vira NaN. Arquivos que já venham com `Date` / `EBIT
 
 O ROIC exportado em **%** não é convertido para fração: o rank da Magic Formula não muda se todos os ativos estão na mesma unidade.
 
-O EBITDA (e em geral o ROIC) costuma aparecer só em datas de fim de trimestre. Nas demais datas o ativo é ignorado por valor inválido — comportamento já existente, não um bug de coluna.
+O EBITDA (e em geral o ROIC) costuma aparecer só em datas de fim de trimestre; nos outros dias o export traz `-`. O ranking **não exige** a data exata: usa o último valor numérico em ou antes da data escolhida (por exemplo, 2026-10-13 reutiliza o trimestre encerrado em 2026-06-30). O ativo só é ignorado se não houver nenhum valor válido até aquela data.
 
 ## Por que não gravar em `dados/`
 
@@ -55,4 +55,4 @@ uv run python scripts/acquirers_multiple.py --data-dir ./dados --date 2025-06-30
 uv run python scripts/magic_formula.py --data-dir ./dados --date 2025-06-30 --n 30
 ```
 
-Escolha uma data em que EBITDA/EV (e ROIC, na Magic Formula) sejam numéricos — em geral o último dia do trimestre.
+Qualquer data no intervalo dos arquivos serve; o ranking puxa o último EBITDA/EV/ROIC disponível até ela.
