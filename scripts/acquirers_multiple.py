@@ -15,24 +15,26 @@ from common import (
 )
 
 
-def _as_of_date(as_of: date | str) -> date:
-    if isinstance(as_of, str):
-        return date.fromisoformat(as_of)
-    return as_of
+def _coerce_date(value: date | str) -> date:
+    if isinstance(value, str):
+        return date.fromisoformat(value)
+    return value
 
 
 def acquirers_multiple_table(
     data_dir: Path | str,
-    as_of: date | str,
+    start_date: date | str,
+    years: int,
     n: int,
     *,
     warnings: list[str] | None = None,
 ) -> RankingResult:
-    """Rank assets by EBITDA/EV and return the score-weighted top N as a table."""
-    as_of = _as_of_date(as_of)
+    """Rank assets by EBITDA/EV using the latest metrics in the year window."""
+    start_date = _coerce_date(start_date)
     universe = load_universe(
         Path(data_dir),
-        as_of,
+        start_date,
+        years,
         require_roic=False,
         warnings=warnings,
     ).copy()
@@ -51,22 +53,29 @@ def acquirers_multiple_table(
 
 def rank_acquirers_multiple(
     data_dir: Path | str,
-    as_of: date | str,
+    start_date: date | str,
+    years: int,
     n: int,
 ) -> list[tuple[str, float, float]]:
     """Rank assets by EBITDA/EV (higher is better) and return score-weighted top N.
+
+    Metrics come from the latest valid row in ``[start_date, start_date + years]``.
 
     Returns
     -------
     list[tuple[str, float, float]]
         (asset_name, earnings_yield_nota, weight proportional to nota)
     """
-    return table_to_portfolio(acquirers_multiple_table(data_dir, as_of, n).table)
+    return table_to_portfolio(
+        acquirers_multiple_table(data_dir, start_date, years, n).table,
+    )
 
 
 def main() -> None:
-    data_dir, as_of, n = parse_args_or_prompt("Acquirer's Multiple portfolio ranking")
-    portfolio = rank_acquirers_multiple(data_dir, as_of, n)
+    data_dir, start_date, years, n = parse_args_or_prompt(
+        "Acquirer's Multiple portfolio ranking",
+    )
+    portfolio = rank_acquirers_multiple(data_dir, start_date, years, n)
     print(portfolio)
 
 

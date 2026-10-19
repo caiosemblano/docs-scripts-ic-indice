@@ -98,10 +98,23 @@ def inspect_data_dir(data_dir: Path) -> tuple[list[Path], list[date]]:
     return paths, sorted(found)
 
 
+def add_years(start_date: date, years: int) -> date:
+    """Return ``start_date`` plus ``years``, clamping 29 Feb to 28 Feb.
+
+    The ranking window is the closed interval ``[start_date, add_years(...)]``.
+    """
+    if years < 1:
+        raise ValueError("Window length in years must be a positive integer")
+    try:
+        return start_date.replace(year=start_date.year + years)
+    except ValueError:
+        return start_date.replace(year=start_date.year + years, day=28)
+
+
 def parse_args_or_prompt(
     description: str,
     default_data_dir: str = "./dados",
-) -> tuple[Path, date, int]:
+) -> tuple[Path, date, int, int]:
     parser = argparse.ArgumentParser(description=description)
     parser.add_argument(
         "--data-dir",
@@ -113,7 +126,13 @@ def parse_args_or_prompt(
         "--date",
         type=str,
         default=None,
-        help="Reference date YYYY-MM-DD",
+        help="Window start date YYYY-MM-DD",
+    )
+    parser.add_argument(
+        "--years",
+        type=int,
+        default=None,
+        help="Window length in years (closed interval from --date)",
     )
     parser.add_argument(
         "--n",
@@ -135,10 +154,16 @@ def parse_args_or_prompt(
         raise SystemExit(f"Data directory not found: {data_dir}")
 
     if args.date is None:
-        raw_date = input("Date (YYYY-MM-DD): ").strip()
+        raw_date = input("Window start date (YYYY-MM-DD): ").strip()
     else:
         raw_date = args.date
-    as_of = _parse_date(raw_date)
+    start_date = _parse_date(raw_date)
+
+    if args.years is None:
+        raw_years = input("Window length in years: ").strip()
+        years = int(raw_years)
+    else:
+        years = args.years
 
     if args.n is None:
         raw_n = input("Portfolio size (n): ").strip()
@@ -146,29 +171,36 @@ def parse_args_or_prompt(
     else:
         n = args.n
 
+    if years < 1:
+        raise SystemExit("Window length --years must be a positive integer")
     if n <= 0:
         raise SystemExit("Portfolio size --n must be a positive integer")
 
-    return data_dir, as_of, n
+    return data_dir, start_date, years, n
 
 
-def _row_as_of(
+def _row_in_window(
     df: pd.DataFrame,
-    as_of: date,
+    start_date: date,
+    end_date: date,
     required: list[str],
 ) -> pd.Series | None:
-    """Return the latest row on or before ``as_of`` with valid ``required`` metrics.
+    """Return the latest row inside ``[start_date, end_date]`` with valid metrics.
 
     Economatica fills EBITDA/EV/ROIC mainly on quarter-ends and leaves ``-`` on
-    other days, so an exact-date match would drop every asset on a date like
-    2026-10-13.
+    other days. Only observations inside the closed window are eligible; history
+    before ``start_date`` and dates after ``end_date`` are ignored.
     """
     if "Date" not in df.columns:
         return None
 
     work = df.copy()
     work["_as_of"] = pd.to_datetime(work["Date"], errors="coerce").dt.date
-    work = work.loc[work["_as_of"].notna() & (work["_as_of"] <= as_of)]
+    work = work.loc[
+        work["_as_of"].notna()
+        & (work["_as_of"] >= start_date)
+        & (work["_as_of"] <= end_date)
+    ]
     if work.empty:
         return None
 
@@ -190,15 +222,26 @@ def _row_as_of(
 
 def load_universe(
     data_dir: Path,
-    as_of: date,
+    start_date: date,
+    years: int,
     *,
     require_roic: bool = False,
     warnings: list[str] | None = None,
 ) -> pd.DataFrame:
-    """Load one row per asset for ``as_of`` from each ``*.xlsx`` in ``data_dir``."""
+    """Load one row per asset from ``[start_date, start_date + years]``.
+
+    Each asset contributes the latest row in that closed window whose required
+    metrics are numeric and whose EV is positive.
+    """
+    if years < 1:
+        raise ValueError("Window length in years must be a positive integer")
+
     paths = list_xlsx_files(data_dir)
     if not paths:
         raise FileNotFoundError(f"No .xlsx files found in {data_dir}")
+
+    end_date = add_years(start_date, years)
+    window = f"{start_date.isoformat()}..{end_date.isoformat()}"
 
     required = ["EBITDA", "EV"]
     if require_roic:
@@ -220,11 +263,11 @@ def load_universe(
             )
             continue
 
-        row = _row_as_of(df, as_of, required)
+        row = _row_in_window(df, start_date, end_date, required)
         if row is None:
             _emit_warning(
                 f"Warning: {asset} has no valid {'/'.join(required)} "
-                f"on or before {as_of.isoformat()}; skipped",
+                f"in {window}; skipped",
                 warnings,
             )
             continue
@@ -235,7 +278,7 @@ def load_universe(
             value = pd.to_numeric(row[col], errors="coerce")
             if pd.isna(value):
                 _emit_warning(
-                    f"Warning: {asset} has invalid {col} on {as_of.isoformat()}; skipped",
+                    f"Warning: {asset} has invalid {col} in {window}; skipped",
                     warnings,
                 )
                 valid = False
@@ -247,7 +290,7 @@ def load_universe(
 
         if float(record["EV"]) <= 0:
             _emit_warning(
-                f"Warning: {asset} has EV <= 0 on {as_of.isoformat()}; skipped",
+                f"Warning: {asset} has EV <= 0 in {window}; skipped",
                 warnings,
             )
             continue
@@ -255,7 +298,7 @@ def load_universe(
         rows.append(record)
 
     if not rows:
-        raise ValueError(f"No valid assets found for {as_of.isoformat()} in {data_dir}")
+        raise ValueError(f"No valid assets found for window {window} in {data_dir}")
 
     return pd.DataFrame(rows)
 

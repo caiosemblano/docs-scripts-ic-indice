@@ -15,7 +15,7 @@ if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
 from acquirers_multiple import acquirers_multiple_table  # noqa: E402
-from common import inspect_data_dir  # noqa: E402
+from common import add_years, inspect_data_dir  # noqa: E402
 from magic_formula import magic_formula_table  # noqa: E402
 
 STRATEGY_ACQUIRERS = "Acquirer's Multiple"
@@ -23,7 +23,7 @@ STRATEGY_MAGIC = "Magic Formula"
 STRATEGY_BOTH = "Comparar ambas"
 DEFAULT_DATA_DIR = "./dados"
 # Bump when ranking or weighting logic changes so @st.cache_data discards stale tables.
-RANKING_LOGIC_VERSION = 2
+RANKING_LOGIC_VERSION = 3
 COLUMN_LABELS = {
     "posicao": "Posição",
     "ativo": "Ativo",
@@ -89,7 +89,8 @@ def cached_inspect(data_dir: str, signature: str) -> tuple[list[str], list[date]
 def run_ranking(
     strategy: str,
     data_dir: str,
-    as_of: str,
+    start_date: str,
+    years: int,
     n: int,
     signature: str,
     logic_version: int,
@@ -97,9 +98,21 @@ def run_ranking(
     del signature, logic_version
     warnings: list[str] = []
     if strategy == STRATEGY_MAGIC:
-        result = magic_formula_table(data_dir, as_of, n, warnings=warnings)
+        result = magic_formula_table(
+            data_dir,
+            start_date,
+            years,
+            n,
+            warnings=warnings,
+        )
     else:
-        result = acquirers_multiple_table(data_dir, as_of, n, warnings=warnings)
+        result = acquirers_multiple_table(
+            data_dir,
+            start_date,
+            years,
+            n,
+            warnings=warnings,
+        )
     return result.table, result.n_valid, warnings
 
 
@@ -123,11 +136,17 @@ def render_portfolio(
     table: pd.DataFrame,
     n_valid: int,
     warnings: list[str],
-    as_of: date,
+    start_date: date,
+    years: int,
+    end_date: date,
     n_files: int,
     slug: str,
 ) -> None:
     st.subheader(title)
+    st.caption(
+        f"Janela {start_date.isoformat()} a {end_date.isoformat()} ({years} ano(s)). "
+        "Cada ativo usa o último EBITDA, EV e ROIC válidos dentro desse intervalo."
+    )
     selected = len(table)
     max_weight = float(table["peso"].max()) if selected else 0.0
     c1, c2, c3, c4 = st.columns(4)
@@ -156,9 +175,9 @@ def render_portfolio(
     st.download_button(
         "Baixar carteira (CSV)",
         data=csv_bytes,
-        file_name=f"carteira_{slug}_{as_of.isoformat()}.csv",
+        file_name=f"carteira_{slug}_{start_date.isoformat()}_{years}anos.csv",
         mime="text/csv",
-        key=f"download_{slug}_{as_of.isoformat()}",
+        key=f"download_{slug}_{start_date.isoformat()}_{years}",
     )
     render_warnings(warnings)
 
@@ -168,7 +187,8 @@ def main() -> None:
     st.title("Ranking de carteiras")
     st.caption(
         "Monte uma carteira ponderada pela nota a partir de planilhas Excel "
-        "(Acquirer's Multiple ou Magic Formula)."
+        "(Acquirer's Multiple ou Magic Formula), usando o último dado válido "
+        "dentro de uma janela de anos."
     )
 
     with st.sidebar:
@@ -191,13 +211,6 @@ def main() -> None:
             [STRATEGY_ACQUIRERS, STRATEGY_MAGIC, STRATEGY_BOTH],
         )
 
-        st.subheader("Configuração temporal")
-        time_mode = st.radio(
-            "Modo temporal",
-            ["Data única (atual)", "Janela de tempo (em breve)"],
-            help="A escolha de intervalo (data inicial e final) está fora do escopo atual.",
-        )
-
     if not data_dir.is_dir():
         st.error(f"Diretório de dados não encontrado: {data_dir}")
         st.stop()
@@ -214,33 +227,38 @@ def main() -> None:
 
     with st.sidebar:
         st.metric("Arquivos .xlsx detectados", n_files)
-        if time_mode.startswith("Janela"):
-            st.info(
-                "Janela de tempo (data inicial e final) ainda não está disponível. "
-                "Use a data de referência abaixo."
-            )
-            start_col, end_col = st.columns(2)
-            start_col.date_input(
-                "Data inicial",
-                value=min_date or date.today(),
-                disabled=True,
-            )
-            end_col.date_input(
-                "Data final",
-                value=max_date or date.today(),
-                disabled=True,
-            )
-
-        as_of = st.date_input(
-            "Data de referência",
-            value=max_date or date.today(),
+        st.subheader("Configuração temporal")
+        start_date = st.date_input(
+            "Data inicial",
+            value=min_date or date.today(),
             min_value=min_date,
             max_value=max_date,
-            key=f"as_of_{data_dir.resolve()}",
+            key=f"start_{data_dir.resolve()}",
             help=(
-                "EBITDA, EV e ROIC da Economatica saem em fim de trimestre. "
-                "O ranking usa o último valor disponível até esta data."
+                "Início da janela. O ranking usa o último EBITDA, EV e ROIC "
+                "válidos entre esta data e a data inicial mais o período em anos. "
+                "Observações anteriores à data inicial são ignoradas."
             ),
+        )
+        years = int(
+            st.number_input(
+                "Período da janela (anos)",
+                min_value=1,
+                value=1,
+                step=1,
+                key=f"years_{data_dir.resolve()}",
+            )
+        )
+        if not isinstance(start_date, date):
+            st.error("Selecione uma data inicial.")
+            st.stop()
+        end_date = add_years(start_date, years)
+        st.date_input(
+            "Data final da janela",
+            value=end_date,
+            disabled=True,
+            key=f"end_{data_dir.resolve()}_{start_date.isoformat()}_{years}",
+            help="Fim inclusivo da janela: data inicial mais o período em anos.",
         )
         max_n = max(1, n_files)
         n = int(
@@ -262,7 +280,7 @@ def main() -> None:
         st.stop()
 
     signature = dir_signature(data_dir)
-    as_of_iso = as_of.isoformat() if isinstance(as_of, date) else str(as_of)
+    start_iso = start_date.isoformat()
     strategies = (
         [STRATEGY_ACQUIRERS, STRATEGY_MAGIC] if strategy == STRATEGY_BOTH else [strategy]
     )
@@ -278,7 +296,8 @@ def main() -> None:
             table, n_valid, warnings = run_ranking(
                 name,
                 str(data_dir),
-                as_of_iso,
+                start_iso,
+                years,
                 n,
                 signature,
                 RANKING_LOGIC_VERSION,
@@ -286,7 +305,17 @@ def main() -> None:
         except (FileNotFoundError, ValueError) as exc:
             st.error(str(exc))
             st.stop()
-        render_portfolio(name, table, n_valid, warnings, as_of, n_files, slugs[name])
+        render_portfolio(
+            name,
+            table,
+            n_valid,
+            warnings,
+            start_date,
+            years,
+            end_date,
+            n_files,
+            slugs[name],
+        )
         return
 
     left, right = st.columns(2)
@@ -296,7 +325,8 @@ def main() -> None:
                 table, n_valid, warnings = run_ranking(
                     name,
                     str(data_dir),
-                    as_of_iso,
+                    start_iso,
+                    years,
                     n,
                     signature,
                     RANKING_LOGIC_VERSION,
@@ -304,7 +334,17 @@ def main() -> None:
             except (FileNotFoundError, ValueError) as exc:
                 st.error(str(exc))
                 continue
-            render_portfolio(name, table, n_valid, warnings, as_of, n_files, slugs[name])
+            render_portfolio(
+                name,
+                table,
+                n_valid,
+                warnings,
+                start_date,
+                years,
+                end_date,
+                n_files,
+                slugs[name],
+            )
 
 
 if __name__ == "__main__":

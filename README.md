@@ -1,6 +1,6 @@
 # Ranking de carteiras — Acquirer's Multiple e Magic Formula
 
-Aplicação que lê vários arquivos Excel (um por ativo), filtra por uma data e monta uma carteira com pesos proporcionais à nota. Há uma interface web em Streamlit e os scripts de linha de comando originais.
+Aplicação que lê vários arquivos Excel (um por ativo), escolhe o último dado válido dentro de uma janela de anos e monta uma carteira com pesos proporcionais à nota. Há uma interface web em Streamlit e os scripts de linha de comando originais.
 
 ## Formato dos dados (Excel)
 
@@ -41,8 +41,9 @@ Os nomes das colunas são case-insensitive. Aceitos:
 | 2024-03-18 | 100000 | 505000  | 0.19 |
 
 - Use **uma linha por dia**.
-- Para cada ativo, o ranking usa o **último valor válido** de EBITDA/EV (e ROIC, na Magic Formula) **em ou antes** da data de referência. Na Economatica esses campos costumam vir só no fim do trimestre; nos outros dias o export traz `-`.
-- Se não houver nenhum valor válido até a data, ou se `EV <= 0`, o ativo é descartado (com aviso).
+- A janela de cálculo é o intervalo fechado `[<date>, <date> + <years> anos]`. `<date>` é a data inicial e `<years>` é a duração em anos (inteiro ≥ 1). O fim da janela cai no mesmo dia e mês, `<years>` anos depois; 29 de fevereiro em ano não bissexto vira 28 de fevereiro.
+- Para cada ativo, o ranking usa o **último valor válido** de EBITDA/EV (e ROIC, na Magic Formula) **dentro dessa janela**. Na Economatica esses campos costumam vir só no fim do trimestre; nos outros dias o export traz `-`. Dados anteriores a `<date>` e posteriores ao fim da janela são ignorados.
+- Se não houver nenhum valor válido dentro da janela, ou se `EV <= 0`, o ativo é descartado (com aviso).
 
 ### O que cada estratégia usa
 
@@ -56,7 +57,24 @@ O **peso** de cada ativo é proporcional à nota na carteira selecionada (os pes
 - Acquirer's Multiple: `peso = nota / soma(notas)` (maior yield recebe mais peso).
 - Magic Formula: `peso = (1/nota) / soma(1/notas)` (menor rank combinado recebe mais peso).
 
-Notas não positivas (por exemplo, yield negativo) ficam com peso 0. Se todas as contribuições forem 0, a carteira cai para pesos iguais `1/n`. A seleção por janela de tempo (data inicial e final) está fora do escopo atual; a interface já reserva esse modo para uma evolução futura.
+Notas não positivas (por exemplo, yield negativo) ficam com peso 0. Se todas as contribuições forem 0, a carteira cai para pesos iguais `1/n`.
+
+### Uma janela por execução
+
+Cada execução calcula **uma** carteira para uma única janela `[data inicial, data inicial + anos]`. A interface e a CLI pedem essa data inicial, o período em anos e o tamanho da carteira (`n`, quantidade de ativos selecionados).
+
+### Geração de todas as janelas possíveis de `<years>` anos — fora de escopo atual
+
+O cálculo de uma janela já está isolado (`start_date` + `years`) para que uma evolução futura possa gerar **todas** as janelas de um mesmo período de uma só vez, sem mudar a regra de cada carteira.
+
+Como isso deve funcionar quando for implementado:
+
+1. Descobrir o intervalo coberto pelos arquivos, `[min_date, max_date]`, com as datas já expostas por `inspect_data_dir`.
+2. Escolher a duração `<years>` (o mesmo inteiro usado hoje) e uma frequência de início — por exemplo, cada data presente nos arquivos, ou um passo configurado (trimestral, anual).
+3. Para cada data inicial candidata `t` em que `t + years` ainda cabe nos dados (`add_years(t, years) <= max_date`), executar o ranking da janela fechada `[t, t + years]`.
+4. Consolidar as carteiras numa estrutura indexada pela janela `(start_date, end_date)`, preservando ativo, nota, peso e os avisos de cada janela.
+
+Esta execução em lote **não** faz parte desta versão: a aplicação calcula somente a janela escolhida.
 
 ## Instalação
 
@@ -76,19 +94,20 @@ Abre em `http://localhost:8501`. Na barra lateral você escolhe:
 
 - o diretório dos arquivos `.xlsx`
 - a estratégia (Acquirer's Multiple, Magic Formula ou as duas)
-- a data de referência
+- a data inicial da janela
+- o período da janela em anos
 - o número de ações na carteira (`n`)
 
-A área principal mostra métricas, a tabela da carteira, exportação em CSV e os avisos de ativos descartados.
+A data final da janela é calculada (data inicial mais o período) e mostrada somente para leitura. A área principal mostra a janela usada, métricas, a tabela da carteira, exportação em CSV e os avisos de ativos descartados.
 
 ## CLI
 
 ```bash
-uv run python scripts/acquirers_multiple.py --data-dir ./dados --date 2024-03-15 --n 30
-uv run python scripts/magic_formula.py --data-dir ./dados --date 2024-03-15 --n 30
+uv run python scripts/acquirers_multiple.py --data-dir ./dados --date 2024-03-15 --years 1 --n 30
+uv run python scripts/magic_formula.py --data-dir ./dados --date 2024-03-15 --years 1 --n 30
 ```
 
-Se `--date` ou `--n` não forem informados, o script pede via input. Se `--data-dir` for omitido, usa `./dados` (ou pergunta se a pasta não existir).
+`--date` é a data inicial da janela. `--years` é a duração em anos (o intervalo vai até essa mesma data, anos depois). `--n` é o número de ações na carteira. Se `--date`, `--years` ou `--n` não forem informados, o script pede via input. Se `--data-dir` for omitido, usa `./dados` (ou pergunta se a pasta não existir).
 
 ### Saída da CLI
 
@@ -113,9 +132,9 @@ Para os scripts CLI:
 docker run --rm -v "$(pwd)/dados:/app/dados:ro" \
   --entrypoint uv ic-indice-ranking \
   run --frozen --no-dev --no-sync python scripts/acquirers_multiple.py \
-  --data-dir /app/dados --date 2024-03-15 --n 30
+  --data-dir /app/dados --date 2024-03-15 --years 1 --n 30
 docker run --rm -v "$(pwd)/dados:/app/dados:ro" \
   --entrypoint uv ic-indice-ranking \
   run --frozen --no-dev --no-sync python scripts/magic_formula.py \
-  --data-dir /app/dados --date 2024-03-15 --n 30
+  --data-dir /app/dados --date 2024-03-15 --years 1 --n 30
 ```

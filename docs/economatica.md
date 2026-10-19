@@ -35,7 +35,7 @@ O traço `-` da Economatica vira NaN. Arquivos que já venham com `Date` / `EBIT
 
 O ROIC exportado em **%** não é convertido para fração: o rank da Magic Formula não muda se todos os ativos estão na mesma unidade.
 
-O EBITDA (e em geral o ROIC) costuma aparecer só em datas de fim de trimestre; nos outros dias o export traz `-`. O ranking **não exige** a data exata: usa o último valor numérico em ou antes da data escolhida (por exemplo, 2026-10-13 reutiliza o trimestre encerrado em 2026-06-30). O ativo só é ignorado se não houver nenhum valor válido até aquela data.
+O EBITDA (e em geral o ROIC) costuma aparecer só em datas de fim de trimestre; nos outros dias o export traz `-`. O ranking **não exige** uma data exata: dada uma data inicial `<date>` e uma duração `<years>` em anos, usa o último valor numérico dentro da janela fechada `[<date>, <date> + <years> anos]`. Observações anteriores à data inicial, ou posteriores ao fim da janela, não entram. O ativo só é ignorado se não houver nenhum valor válido dentro dessa janela.
 
 ## Por que não gravar em `dados/`
 
@@ -51,8 +51,8 @@ Coloque os `.xlsx` em `./dados` (ou outro diretório) e rode a interface ou a CL
 
 ```bash
 uv run streamlit run app.py
-uv run python scripts/acquirers_multiple.py --data-dir ./dados --date 2025-06-30 --n 30
-uv run python scripts/magic_formula.py --data-dir ./dados --date 2025-06-30 --n 30
+uv run python scripts/acquirers_multiple.py --data-dir ./dados --date 2024-01-01 --years 1 --n 30
+uv run python scripts/magic_formula.py --data-dir ./dados --date 2024-01-01 --years 1 --n 30
 ```
 
-Qualquer data no intervalo dos arquivos serve; o ranking puxa o último EBITDA/EV/ROIC disponível até ela.
+A data inicial precisa cair no intervalo dos arquivos de um jeito que a janela ainda contenha algum EBITDA/EV/ROIC. O ranking puxa o último valor válido dentro de `[data inicial, data inicial + anos]`, e não reutiliza trimestres anteriores ao início da janela.

@@ -15,24 +15,26 @@ from common import (
 )
 
 
-def _as_of_date(as_of: date | str) -> date:
-    if isinstance(as_of, str):
-        return date.fromisoformat(as_of)
-    return as_of
+def _coerce_date(value: date | str) -> date:
+    if isinstance(value, str):
+        return date.fromisoformat(value)
+    return value
 
 
 def magic_formula_table(
     data_dir: Path | str,
-    as_of: date | str,
+    start_date: date | str,
+    years: int,
     n: int,
     *,
     warnings: list[str] | None = None,
 ) -> RankingResult:
-    """Rank assets by combined EY + ROIC ranks and return the top N as a table."""
-    as_of = _as_of_date(as_of)
+    """Rank assets by combined EY + ROIC ranks inside a year window."""
+    start_date = _coerce_date(start_date)
     universe = load_universe(
         Path(data_dir),
-        as_of,
+        start_date,
+        years,
         require_roic=True,
         warnings=warnings,
     ).copy()
@@ -56,22 +58,27 @@ def magic_formula_table(
 
 def rank_magic_formula(
     data_dir: Path | str,
-    as_of: date | str,
+    start_date: date | str,
+    years: int,
     n: int,
 ) -> list[tuple[str, float, float]]:
     """Rank assets by combined EY + ROIC ranks (lower combined rank is better).
+
+    Metrics come from the latest valid row in ``[start_date, start_date + years]``.
 
     Returns
     -------
     list[tuple[str, float, float]]
         (asset_name, combined_rank_nota, weight proportional to 1/nota)
     """
-    return table_to_portfolio(magic_formula_table(data_dir, as_of, n).table)
+    return table_to_portfolio(
+        magic_formula_table(data_dir, start_date, years, n).table,
+    )
 
 
 def main() -> None:
-    data_dir, as_of, n = parse_args_or_prompt("Magic Formula portfolio ranking")
-    portfolio = rank_magic_formula(data_dir, as_of, n)
+    data_dir, start_date, years, n = parse_args_or_prompt("Magic Formula portfolio ranking")
+    portfolio = rank_magic_formula(data_dir, start_date, years, n)
     print(portfolio)
 
 
