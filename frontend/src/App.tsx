@@ -182,13 +182,26 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    fetchDatasetSummary(false)
-      .then((summary) => {
+    let cancelled = false;
+    (async () => {
+      setLoadingRun(true);
+      setLoadingMulti(true);
+      try {
+        const summary = await fetchDatasetSummary(false);
+        if (cancelled) return;
         setDataset(summary);
-      })
-      .catch((err: Error) => setError(err.message));
-
-    executeSimulation(INITIAL_FORM);
+        await executeSimulation(INITIAL_FORM);
+      } catch (err) {
+        if (!cancelled) {
+          setError(err instanceof Error ? err.message : 'Erro ao inicializar aplicação.');
+          setLoadingRun(false);
+          setLoadingMulti(false);
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
   }, [executeSimulation]);
 
   const handleRefreshDataset = async () => {

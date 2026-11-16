@@ -41,13 +41,23 @@ function buildSharedPayload(form: BacktestFormState) {
   };
 }
 
+async function safeFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+  try {
+    return await fetch(input, init);
+  } catch {
+    throw new Error(
+      'Falha de conexão com o servidor (verifique se o container/backend está em execução na porta 8000).',
+    );
+  }
+}
+
 export async function fetchDatasetSummary(refresh = false): Promise<DatasetSummary> {
-  const res = await fetch(`/api/dataset/summary?refresh=${refresh}`);
+  const res = await safeFetch(`/api/dataset/summary?refresh=${refresh}`);
   return handleJson<DatasetSummary>(res);
 }
 
 export async function fetchDatasetAudit(refresh = false): Promise<DatasetAuditResponse> {
-  const res = await fetch(`/api/dataset/audit?refresh=${refresh}`);
+  const res = await safeFetch(`/api/dataset/audit?refresh=${refresh}`);
   return handleJson<DatasetAuditResponse>(res);
 }
 
@@ -58,7 +68,7 @@ export async function runBacktest(form: BacktestFormState): Promise<BacktestRunR
     window_years: form.window_mode === 'preset' ? form.window_years : null,
     start_date: form.window_mode === 'custom' ? form.start_date : null,
   };
-  const res = await fetch('/api/backtest/run', {
+  const res = await safeFetch('/api/backtest/run', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
@@ -71,7 +81,7 @@ export async function runMultiWindow(form: BacktestFormState): Promise<MultiWind
     ...buildSharedPayload(form),
     windows_years: [1, 3, 5, 10, 15, 20],
   };
-  const res = await fetch('/api/backtest/multi-window', {
+  const res = await safeFetch('/api/backtest/multi-window', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
