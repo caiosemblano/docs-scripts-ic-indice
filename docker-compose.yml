@@ -1,18 +1,48 @@
 services:
+  web:
+    build: .
+    image: ic-indice-app
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data:/app/data:ro
+      - ./dados:/app/dados:ro
+      - ic_indice_cache:/app/.cache
+    restart: unless-stopped
+
+  audit:
+    build: .
+    image: ic-indice-app
+    profiles: ["cli"]
+    volumes:
+      - ./data:/app/data
+      - ./dados:/app/dados
+      - ./audit_reports:/app/audit_reports
+    entrypoint: ["python", "scripts/audit_economatica_files.py"]
+
   acquirers:
     build: .
-    image: ic-indice-ranking
+    image: ic-indice-app
+    profiles: ["cli"]
     volumes:
+      - ./data:/app/data:ro
       - ./dados:/app/dados:ro
+      - ic_indice_cache:/app/.cache
     stdin_open: true
     tty: true
-    entrypoint: ["python", "scripts/acquirers_multiple.py", "--data-dir", "/app/dados"]
+    entrypoint: ["python", "scripts/acquirers_multiple.py"]
 
   magic-formula:
     build: .
-    image: ic-indice-ranking
+    image: ic-indice-app
+    profiles: ["cli"]
     volumes:
+      - ./data:/app/data:ro
       - ./dados:/app/dados:ro
+      - ic_indice_cache:/app/.cache
     stdin_open: true
     tty: true
-    entrypoint: ["python", "scripts/magic_formula.py", "--data-dir", "/app/dados"]
+    entrypoint: ["python", "scripts/magic_formula.py"]
+
+volumes:
+  ic_indice_cache:
