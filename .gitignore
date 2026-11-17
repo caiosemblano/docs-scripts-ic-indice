@@ -1,0 +1,43 @@
+# Dados de mercado e separação de auditoria
+/data/
+/dados/*
+!/dados/.gitkeep
+/data_ebitda_12m/
+/data_reexportar_12m/
+/data_duplicados/
+/data_invalidos/
+/data_quarentena/
+/audit_reports/
+
+# Caches quantitativos
+.cache/
+*.parquet
+*.pkl
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+ENV/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+dist/
+build/
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+node_modules/
+*.tsbuildinfo
+
+# Sistema e IDE
+.DS_Store
+.env
+.env.local
+*.log
+
+.vscode/

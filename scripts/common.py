@@ -1,38 +1,27 @@
-"""Shared helpers for multi-xlsx ranking scripts."""
+"""Shared helpers for multi-xlsx ranking scripts (Economatica & standard Excel compatible)."""
 
 from __future__ import annotations
 
 import argparse
-import sys
 from datetime import date, datetime
 from pathlib import Path
+import sys
 from typing import Iterable
 
+import numpy as np
 import pandas as pd
 
-DATE_ALIASES = {"date", "data"}
-COLUMN_ALIASES = {
-    "ebitda": "EBITDA",
-    "ev": "EV",
-    "roic": "ROIC",
-}
+ROOT_DIR = Path(__file__).resolve().parent.parent
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
+
+from backend.app.core.data_loader import EbitdaMode, default_data_manager  # noqa: E402
 
 
 def equal_weight(n: int) -> float:
     if n <= 0:
         raise ValueError("Portfolio size must be positive")
     return 1.0 / n
-
-
-def _normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
-    rename: dict[str, str] = {}
-    for col in df.columns:
-        key = str(col).strip().lower()
-        if key in DATE_ALIASES:
-            rename[col] = "Date"
-        elif key in COLUMN_ALIASES:
-            rename[col] = COLUMN_ALIASES[key]
-    return df.rename(columns=rename)
 
 
 def _parse_date(value: str | date | datetime) -> date:
@@ -43,16 +32,28 @@ def _parse_date(value: str | date | datetime) -> date:
     return datetime.strptime(str(value).strip(), "%Y-%m-%d").date()
 
 
+def _resolve_cli_data_dir(explicit: Path | None, default_data_dir: str) -> Path:
+    if explicit is not None:
+        return explicit
+    for cand in (Path(default_data_dir), Path("./data"), Path("./dados")):
+        if cand.is_dir() and any(cand.glob("*.xlsx")):
+            return cand
+    candidate = Path(default_data_dir)
+    if candidate.is_dir():
+        return candidate
+    return Path(input(f"Data directory [{default_data_dir}]: ").strip() or default_data_dir)
+
+
 def parse_args_or_prompt(
     description: str,
     default_data_dir: str = "./dados",
-) -> tuple[Path, date, int]:
+) -> tuple[Path, date, int, bool]:
     parser = argparse.ArgumentParser(description=description)
     parser.add_argument(
         "--data-dir",
         type=Path,
         default=None,
-        help=f"Directory with one .xlsx per asset (default: {default_data_dir})",
+        help=f"Directory with one .xlsx per asset (default: ./data or {default_data_dir})",
     )
     parser.add_argument(
         "--date",
@@ -66,16 +67,14 @@ def parse_args_or_prompt(
         default=None,
         help="Number of stocks in the portfolio",
     )
+    parser.add_argument(
+        "--allow-duplicate-issuers",
+        action="store_true",
+        help="Allow multiple share classes (ON/PN/UNIT) of the same company in the portfolio",
+    )
     args = parser.parse_args()
 
-    data_dir = args.data_dir
-    if data_dir is None:
-        candidate = Path(default_data_dir)
-        if candidate.is_dir():
-            data_dir = candidate
-        else:
-            data_dir = Path(input(f"Data directory [{default_data_dir}]: ").strip() or default_data_dir)
-
+    data_dir = _resolve_cli_data_dir(args.data_dir, default_data_dir)
     if not data_dir.is_dir():
         raise SystemExit(f"Data directory not found: {data_dir}")
 
@@ -94,81 +93,49 @@ def parse_args_or_prompt(
     if n <= 0:
         raise SystemExit("Portfolio size --n must be a positive integer")
 
-    return data_dir, as_of, n
-
-
-def _row_for_date(df: pd.DataFrame, as_of: date) -> pd.Series | None:
-    if "Date" not in df.columns:
-        return None
-
-    dates = pd.to_datetime(df["Date"], errors="coerce").dt.date
-    matched = df.loc[dates == as_of]
-    if matched.empty:
-        return None
-    return matched.iloc[-1]
+    deduplicate_issuers = not args.allow_duplicate_issuers
+    return data_dir, as_of, n, deduplicate_issuers
 
 
 def load_universe(
-    data_dir: Path,
-    as_of: date,
+    data_dir: Path | str,
+    as_of: date | str,
     *,
     require_roic: bool = False,
+    ebitda_mode: EbitdaMode = "ltm",
+    deduplicate_issuers: bool = False,
 ) -> pd.DataFrame:
-    """Load one row per asset for ``as_of`` from each ``*.xlsx`` in ``data_dir``."""
-    paths = sorted(data_dir.glob("*.xlsx"))
+    """Load valid asset universe as of ``as_of`` from ``data_dir``."""
+    folder = Path(data_dir)
+    paths = sorted(p for p in folder.glob("*.xlsx") if not p.name.startswith("~$"))
     if not paths:
-        raise FileNotFoundError(f"No .xlsx files found in {data_dir}")
+        raise FileNotFoundError(f"No .xlsx files found in {folder}")
 
-    required = ["EBITDA", "EV"]
+    as_of_date = _parse_date(as_of)
+    dataset = default_data_manager.load(folder)
+    snap = dataset.snapshot_fundamentals(as_of_date, ebitda_mode=ebitda_mode)
+    if snap.empty:
+        raise ValueError(f"No valid assets found for {as_of_date.isoformat()} in {folder}")
+
+    mask = np.isfinite(snap["EV"].to_numpy(dtype=np.float64)) & (snap["EV"].to_numpy(dtype=np.float64) > 0.0)
+    mask &= np.isfinite(snap["EBITDA"].to_numpy(dtype=np.float64))
     if require_roic:
-        required.append("ROIC")
+        mask &= np.isfinite(snap["ROIC"].to_numpy(dtype=np.float64))
 
-    rows: list[dict[str, object]] = []
-    for path in paths:
-        asset = path.stem
-        try:
-            raw = pd.read_excel(path, engine="openpyxl")
-        except Exception as exc:  # noqa: BLE001 - surface file-level failures
-            print(f"Warning: failed to read {path.name}: {exc}", file=sys.stderr)
-            continue
+    valid_df = snap.loc[mask].copy()
+    if valid_df.empty:
+        raise ValueError(f"No valid assets found for {as_of_date.isoformat()} in {folder}")
 
-        df = _normalize_columns(raw)
-        missing = [c for c in ["Date", *required] if c not in df.columns]
-        if missing:
-            print(
-                f"Warning: {path.name} missing columns {missing}; skipped",
-                file=sys.stderr,
-            )
-            continue
+    if deduplicate_issuers and "issuer" in valid_df.columns:
+        valid_df["_ey"] = valid_df["EBITDA"] / valid_df["EV"]
+        valid_df = (
+            valid_df.sort_values(["presence_63d", "_ey", "ativo"], ascending=[False, False, True])
+            .drop_duplicates(subset=["issuer"], keep="first")
+            .drop(columns=["_ey"])
+            .copy()
+        )
 
-        row = _row_for_date(df, as_of)
-        if row is None:
-            print(f"Warning: {asset} has no row for {as_of.isoformat()}; skipped", file=sys.stderr)
-            continue
-
-        record: dict[str, object] = {"ativo": asset}
-        valid = True
-        for col in required:
-            value = pd.to_numeric(row[col], errors="coerce")
-            if pd.isna(value):
-                print(f"Warning: {asset} has invalid {col} on {as_of.isoformat()}; skipped", file=sys.stderr)
-                valid = False
-                break
-            record[col] = float(value)
-
-        if not valid:
-            continue
-
-        if float(record["EV"]) <= 0:
-            print(f"Warning: {asset} has EV <= 0 on {as_of.isoformat()}; skipped", file=sys.stderr)
-            continue
-
-        rows.append(record)
-
-    if not rows:
-        raise ValueError(f"No valid assets found for {as_of.isoformat()} in {data_dir}")
-
-    return pd.DataFrame(rows)
+    return valid_df.reset_index(drop=True)
 
 
 def to_portfolio(
