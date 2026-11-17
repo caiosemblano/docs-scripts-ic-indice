@@ -37,8 +37,6 @@ export interface DatasetAuditResponse {
 
 export interface BacktestFormState {
   strategies: StrategyName[];
-  window_mode: 'preset' | 'custom';
-  window_years: number;
   start_date: string;
   end_date: string;
   portfolio_size: number;
@@ -137,13 +135,47 @@ export interface BacktestRunResponse {
   comparison_chart: ComparisonChartPoint[];
 }
 
-export interface WindowComparisonEntry {
-  window_years: number;
+export interface RollingSubWindow {
+  index: number;
+  label: string;
   requested_start_date: string;
+  requested_end_date: string;
   effective_start_date: string;
   effective_end_date: string;
   window_clamped: boolean;
   strategies: Record<string, PerformanceSummary>;
+}
+
+export interface RollingStrategyAggregate {
+  window_count: number;
+  positive_cagr_count: number;
+  win_rate_pct: number;
+  beat_other_count: number | null;
+  beat_other_pct: number | null;
+  mean_cagr_pct: number;
+  median_cagr_pct: number;
+  min_cagr_pct: number;
+  max_cagr_pct: number;
+  worst_window_label: string;
+  best_window_label: string;
+  mean_xirr_pct: number | null;
+  median_xirr_pct: number | null;
+  mean_total_invested: number;
+  mean_final_equity: number;
+  median_final_equity: number;
+  min_final_equity: number;
+  max_final_equity: number;
+  mean_max_drawdown_pct: number;
+  worst_max_drawdown_pct: number;
+}
+
+export interface WindowComparisonEntry {
+  window_years: number;
+  window_count: number;
+  base_start_date: string;
+  base_end_date: string;
+  aggregates: Record<string, RollingStrategyAggregate>;
+  rolling_windows: RollingSubWindow[];
   error: string | null;
 }
 

@@ -61,12 +61,18 @@ export async function fetchDatasetAudit(refresh = false): Promise<DatasetAuditRe
   return handleJson<DatasetAuditResponse>(res);
 }
 
-export async function runBacktest(form: BacktestFormState): Promise<BacktestRunResponse> {
+export async function runBacktest(
+  form: BacktestFormState,
+  overrideRange?: { start_date: string; end_date: string },
+): Promise<BacktestRunResponse> {
+  const startDate = overrideRange ? overrideRange.start_date : form.start_date || null;
+  const endDate = overrideRange ? overrideRange.end_date : form.end_date || null;
   const payload = {
     ...buildSharedPayload(form),
-    window_mode: form.window_mode,
-    window_years: form.window_mode === 'preset' ? form.window_years : null,
-    start_date: form.window_mode === 'custom' ? form.start_date : null,
+    window_mode: 'custom' as const,
+    window_years: null,
+    start_date: startDate,
+    end_date: endDate,
   };
   const res = await safeFetch('/api/backtest/run', {
     method: 'POST',
@@ -79,6 +85,7 @@ export async function runBacktest(form: BacktestFormState): Promise<BacktestRunR
 export async function runMultiWindow(form: BacktestFormState): Promise<MultiWindowResponse> {
   const payload = {
     ...buildSharedPayload(form),
+    start_date: form.start_date ? form.start_date : null,
     windows_years: [1, 3, 5, 10, 15, 20],
   };
   const res = await safeFetch('/api/backtest/multi-window', {
