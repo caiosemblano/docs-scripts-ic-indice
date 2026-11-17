@@ -640,13 +640,23 @@ export default function App() {
                   </div>
 
                   <div>
-                    <label className="block text-[11px] text-slate-400">
-                      Liquidez Mínima (pregões últimos 63d): {form.min_presence_63d}
-                    </label>
+                    <div className="flex items-center justify-between text-[11px]">
+                      <label className="text-slate-400">
+                        Presença Mínima em Pregão (Liquidez)
+                      </label>
+                      <span className="font-semibold text-emerald-400">
+                        {form.min_presence_63d === 0
+                          ? 'Sem filtro (0/63)'
+                          : `${form.min_presence_63d} de 63 pregões (${Math.round(
+                              (form.min_presence_63d / 63) * 100
+                            )}%)`}
+                      </span>
+                    </div>
                     <input
                       type="range"
                       min={0}
-                      max={60}
+                      max={63}
+                      step={1}
                       value={form.min_presence_63d}
                       onChange={(e) =>
                         setForm((prev) => ({
@@ -654,8 +664,16 @@ export default function App() {
                           min_presence_63d: Number(e.target.value),
                         }))
                       }
-                      className="mt-1 w-full accent-emerald-500"
+                      className="mt-1.5 w-full accent-emerald-500"
                     />
+                    <div className="mt-0.5 flex justify-between text-[10px] text-slate-500">
+                      <span>0 pregões</span>
+                      <span>63 pregões (~3 meses úteis)</span>
+                    </div>
+                    <p className="mt-1 text-[10px] leading-relaxed text-slate-500">
+                      Unidade: <strong className="text-slate-400">nº de pregões com cotação válida</strong>{' '}
+                      nos últimos 63 dias úteis (não é volume financeiro em R$).
+                    </p>
                   </div>
                 </div>
               )}
