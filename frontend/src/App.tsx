@@ -672,7 +672,9 @@ export default function App() {
                     </div>
                     <p className="mt-1 text-[10px] leading-relaxed text-slate-500">
                       Unidade: <strong className="text-slate-400">nº de pregões com cotação válida</strong>{' '}
-                      nos últimos 63 dias úteis (não é volume financeiro em R$).
+                      nos últimos 63 pregões reais da bolsa (não é volume financeiro em R$). Valores
+                      muito altos (ex.: 60–63) descartam ações que ficaram sem negócio em um único dia
+                      e podem reduzir os ativos elegíveis.
                     </p>
                   </div>
                 </div>

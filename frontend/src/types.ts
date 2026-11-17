@@ -73,6 +73,7 @@ export interface PerformanceSummary {
   max_drawdown_pct: number;
   sharpe_ratio: number | null;
   rebalances_count: number;
+  skipped_rebalances?: number;
 }
 
 export interface RankedHolding {
@@ -169,6 +170,13 @@ export interface RollingStrategyAggregate {
   worst_max_drawdown_pct: number;
 }
 
+export interface SkippedWindow {
+  label: string;
+  requested_start_date: string;
+  requested_end_date: string;
+  reason: string;
+}
+
 export interface WindowComparisonEntry {
   window_years: number;
   window_count: number;
@@ -176,6 +184,7 @@ export interface WindowComparisonEntry {
   base_end_date: string;
   aggregates: Record<string, RollingStrategyAggregate>;
   rolling_windows: RollingSubWindow[];
+  skipped_windows: SkippedWindow[];
   error: string | null;
 }
 
