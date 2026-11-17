@@ -33,6 +33,7 @@ from backend.app.schemas import (
     PerformanceSummarySchema,
     RollingStrategyAggregateSchema,
     RollingSubWindowSchema,
+    SkippedWindowSchema,
     StrategyResultSchema,
     WindowComparisonEntrySchema,
 )
@@ -184,6 +185,7 @@ def run_backtest_endpoint(payload: BacktestRunRequest) -> BacktestRunResponse:
         require_positive_ebitda=payload.require_positive_ebitda,
         min_presence_63d=payload.min_presence_63d,
         risk_free_rate_annual=payload.risk_free_rate_annual,
+        max_start_delay_days=None,
     )
 
     raw_results: dict[str, StrategyBacktestResult] = {}
@@ -271,6 +273,15 @@ def run_multi_window_endpoint(payload: MultiWindowRequest) -> MultiWindowRespons
                         },
                     )
                     for rw in comp.rolling_windows
+                ],
+                skipped_windows=[
+                    SkippedWindowSchema(
+                        label=sw.label,
+                        requested_start_date=sw.requested_start_date,
+                        requested_end_date=sw.requested_end_date,
+                        reason=sw.reason,
+                    )
+                    for sw in comp.skipped_windows
                 ],
                 error=comp.error,
             )

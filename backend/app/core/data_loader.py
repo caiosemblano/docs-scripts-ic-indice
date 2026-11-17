@@ -24,7 +24,7 @@ from backend.app.core.economatica_xml import (
 )
 from scripts.audit_economatica_files import AuditRecord, DatasetAuditResult, audit_directory
 
-CACHE_SCHEMA_VERSION = "v3"
+CACHE_SCHEMA_VERSION = "v5"
 PRICE_FFILL_LIMIT = 35  # ~7 weeks of trading days (handles thin trading & staggered batch exports)
 EbitdaMode = Literal["ltm", "raw"]
 
@@ -169,19 +169,71 @@ def _ffill_matrix_limit_inplace(mat: np.ndarray, limit: int) -> None:
         row[can_fill] = last_val[can_fill]
 
 
-def _compute_presence_63d_uint8(price_mat: np.ndarray, chunk_cols: int = 256) -> np.ndarray:
-    """Compute rolling 63-row count of valid raw prices into a compact ``uint8`` matrix."""
+def _compute_exchange_trading_mask(price_mat: np.ndarray) -> np.ndarray:
+    """Identify primary-exchange trading sessions, filtering out local holidays where only a few foreign-listed tickers traded."""
+    n_rows = price_mat.shape[0]
+    if n_rows == 0:
+        return np.zeros(0, dtype=bool)
+
+    raw_counts = np.sum(np.isfinite(price_mat), axis=1)
+    nonzero_idx = np.flatnonzero(raw_counts > 0)
+    if len(nonzero_idx) == 0:
+        return np.zeros(n_rows, dtype=bool)
+
+    nz_counts = raw_counts[nonzero_idx].astype(np.float64)
+    # Rolling 21-observation local peak of active tickers so isolated holidays with <20% participation are excluded
+    s_ref = pd.Series(nz_counts).rolling(window=21, min_periods=1, center=True).quantile(0.75).to_numpy()
+    min_required = np.where(s_ref >= 5.0, np.ceil(s_ref * 0.20), 1.0)
+    keep_nz = nz_counts >= min_required
+
+    mask = np.zeros(n_rows, dtype=bool)
+    mask[nonzero_idx[keep_nz]] = True
+    return mask
+
+
+def _compute_presence_63d_uint8(
+    price_mat: np.ndarray,
+    trading_mask: np.ndarray | None = None,
+    chunk_cols: int = 256,
+) -> np.ndarray:
+    """Compute rolling 63-trading-day count of valid raw prices into a compact ``uint8`` matrix.
+
+    When ``trading_mask`` is provided, only rows where ``trading_mask`` is True count toward
+    the 63-day rolling window, and non-trading rows (holidays / calendar-only rows) inherit
+    the latest prior trading row's presence count.
+    """
     n_rows, n_cols = price_mat.shape
     out = np.zeros((n_rows, n_cols), dtype=np.uint8)
     if n_rows == 0 or n_cols == 0:
         return out
 
+    if trading_mask is None:
+        for c0 in range(0, n_cols, chunk_cols):
+            c1 = min(n_cols, c0 + chunk_cols)
+            csum = np.cumsum(np.isfinite(price_mat[:, c0:c1]), axis=0, dtype=np.int32)
+            if n_rows > 63:
+                csum[63:] = csum[63:] - csum[:-63]
+            out[:, c0:c1] = csum.astype(np.uint8)
+        return out
+
+    t_indices = np.flatnonzero(trading_mask)
+    n_trade = len(t_indices)
+    if n_trade == 0:
+        return out
+
     for c0 in range(0, n_cols, chunk_cols):
         c1 = min(n_cols, c0 + chunk_cols)
-        csum = np.cumsum(np.isfinite(price_mat[:, c0:c1]), axis=0, dtype=np.int32)
-        if n_rows > 63:
+        sub_trade = np.isfinite(price_mat[t_indices, c0:c1])
+        csum = np.cumsum(sub_trade, axis=0, dtype=np.int32)
+        if n_trade > 63:
             csum[63:] = csum[63:] - csum[:-63]
-        out[:, c0:c1] = csum.astype(np.uint8)
+        trade_pres = csum.astype(np.uint8)
+
+        # Map each calendar/holiday row to the latest prior trading row (or 0 before first trading day)
+        prev_trade_pos = np.searchsorted(t_indices, np.arange(n_rows), side="right") - 1
+        valid_pos = prev_trade_pos >= 0
+        out[valid_pos, c0:c1] = trade_pres[prev_trade_pos[valid_pos]]
+
     return out
 
 
@@ -474,7 +526,7 @@ class MarketDataManager:
             tmask_path = cache_dir / "trading_mask.npy"
             prices_path = cache_dir / "prices_ffill.npy"
             ev_path = cache_dir / "ev_ffill.npy"
-            pres_path = cache_dir / "presence_63d.npy"
+            pres_path = cache_dir / "presence_63d_v2.npy"
             lv_row_path = cache_dir / "last_valid_row.npy"
             lv_val_path = cache_dir / "last_valid_val.npy"
             fund_path = cache_dir / "fundamentals.parquet"
@@ -621,7 +673,7 @@ class MarketDataManager:
             del fund_tickers, fund_ords, fund_eb_raw, fund_eb_ltm, fund_roics
 
             # Extract raw trading statistics BEFORE mutating price_mat / ev_mat in-place
-            trading_mask = np.any(np.isfinite(price_mat), axis=1)
+            trading_mask = _compute_exchange_trading_mask(price_mat)
             last_valid_row = np.full(n_tickers, -1, dtype=np.int32)
             last_valid_val = np.full(n_tickers, np.nan, dtype=np.float64)
             for c in range(n_tickers):
@@ -631,7 +683,7 @@ class MarketDataManager:
                     last_valid_row[c] = lr
                     last_valid_val[c] = float(price_mat[lr, c])
 
-            presence_63d = _compute_presence_63d_uint8(price_mat)
+            presence_63d = _compute_presence_63d_uint8(price_mat, trading_mask)
             _ffill_matrix_limit_inplace(price_mat, PRICE_FFILL_LIMIT)
             _ffill_matrix_limit_inplace(ev_mat, PRICE_FFILL_LIMIT)
 

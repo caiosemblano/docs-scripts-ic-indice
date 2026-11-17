@@ -95,6 +95,7 @@ class BacktestConfig:
     require_positive_ebitda: bool = True
     min_presence_63d: int = 10
     risk_free_rate_annual: float = 0.0
+    max_start_delay_days: int | None = 31
 
 
 @dataclass(slots=True)
@@ -217,8 +218,19 @@ def run_strategy_backtest(
     first_valid_offset: int | None = None
     initial_holdings: list[RankedHolding] = []
     probe_step = 1 if len(row_indices) <= 60 else 5
+    max_allowed_start_dt = (
+        req_start + timedelta(days=config.max_start_delay_days)
+        if config.max_start_delay_days is not None
+        else None
+    )
 
     for offset in range(0, len(row_indices) - 1, probe_step):
+        if (
+            max_allowed_start_dt is not None
+            and offset > 0
+            and all_sim_dates[max(0, offset - probe_step + 1)] > max_allowed_start_dt
+        ):
+            break
         cand_holdings = _rank_on_date(all_sim_dates[offset])
         if cand_holdings:
             # Refine exact day if probe_step > 1
@@ -234,9 +246,21 @@ def run_strategy_backtest(
             break
 
     if first_valid_offset is None or not initial_holdings:
+        if max_allowed_start_dt is not None:
+            raise ValueError(
+                f"Nenhum ativo elegivel para '{strategy}' ate {config.max_start_delay_days} dias "
+                f"apos o inicio ({req_start.isoformat()})."
+            )
         raise ValueError(
             f"Nenhum ativo elegivel encontrado para '{strategy}' na janela solicitada "
             f"({req_start.isoformat()} ate {all_sim_dates[-1].isoformat()})."
+        )
+
+    if max_allowed_start_dt is not None and all_sim_dates[first_valid_offset] > max_allowed_start_dt:
+        raise ValueError(
+            f"Nenhum ativo elegivel para '{strategy}' ate {config.max_start_delay_days} dias "
+            f"apos o inicio ({req_start.isoformat()}; primeiro elegivel apenas em "
+            f"{all_sim_dates[first_valid_offset].isoformat()})."
         )
 
     if first_valid_offset > 0:
@@ -262,6 +286,7 @@ def run_strategy_backtest(
     cashflows: list[tuple[date, float]] = [(all_sim_dates[0], -float(config.initial_capital))]
 
     rebalances: list[RebalanceEvent] = []
+    skipped_rebalances = 0
     rebalance_months = REBALANCE_MONTHS_MAP[config.rebalance_frequency]
 
     def _apply_rebalance(day_idx: int, dt: date, holdings: list[RankedHolding]) -> None:
@@ -431,6 +456,8 @@ def run_strategy_backtest(
             if new_holdings:
                 _apply_rebalance(day_idx, dt, new_holdings)
                 did_rebalance = True
+            else:
+                skipped_rebalances += 1
             # Advance schedule anchored to start_dt cycle so drift doesn't accumulate
             assert rebalance_months is not None
             while next_rebalance_dt <= dt:
@@ -457,6 +484,7 @@ def run_strategy_backtest(
         monthly_contribution=config.monthly_contribution,
         contributions_count=contributions_count,
         rebalances_count=len(rebalances),
+        skipped_rebalances=skipped_rebalances,
         risk_free_rate_annual=config.risk_free_rate_annual,
     )
 
@@ -487,6 +515,14 @@ def run_strategy_backtest(
         curve=curve,
         rebalances=rebalances if include_rebalances else [],
     )
+
+
+@dataclass(slots=True)
+class SkippedRollingWindow:
+    label: str
+    requested_start_date: str
+    requested_end_date: str
+    reason: str
 
 
 @dataclass(slots=True)
@@ -533,6 +569,7 @@ class RollingHorizonComparison:
     base_end_date: str
     aggregates: dict[StrategyName, RollingStrategyAggregate]
     rolling_windows: list[RollingSubWindowResult]
+    skipped_windows: list[SkippedRollingWindow]
     error: str | None = None
 
 
@@ -652,6 +689,7 @@ def run_multi_window_rolling(
                     base_end_date=effective_base_end.isoformat(),
                     aggregates={},
                     rolling_windows=[],
+                    skipped_windows=[],
                     error=(
                         f"Intervalo selecionado ({effective_base_start.year}→{effective_base_end.year}) "
                         f"menor que {w_years} {'ano' if w_years == 1 else 'anos'}."
@@ -661,19 +699,28 @@ def run_multi_window_rolling(
             continue
 
         rolling_windows: list[RollingSubWindowResult] = []
+        skipped_windows: list[SkippedRollingWindow] = []
         last_err: str | None = None
+        sub_delay_limit = (
+            base_config.max_start_delay_days
+            if base_config.max_start_delay_days is not None
+            else 31
+        )
 
         for idx, (s_dt, e_dt) in enumerate(spans, start=1):
+            req_label = f"{s_dt.year} → {e_dt.year}"
             sub_cfg = replace(
                 base_config,
                 window_years=None,
                 start_date=s_dt,
                 end_date=e_dt,
+                max_start_delay_days=sub_delay_limit,
             )
             strat_summaries: dict[StrategyName, PerformanceSummary] = {}
             eff_s = ""
             eff_e = ""
             clamped = False
+            sub_errors: list[str] = []
 
             for strat in strategies:
                 try:
@@ -692,32 +739,64 @@ def run_multi_window_rolling(
                         eff_e = res.effective_end_date
                     clamped = clamped or res.window_clamped
                 except ValueError as exc:
+                    sub_errors.append(str(exc))
                     last_err = str(exc)
 
-            if strat_summaries:
-                # Skip sub-window if clamping truncated actual duration below 60% of target horizon
-                ref_summary = next(iter(strat_summaries.values()))
-                if ref_summary.elapsed_years < (w_years * 0.6):
-                    last_err = (
-                        f"Dados fundamentalistas insuficientes para completar {w_years} anos "
-                        f"a partir de {s_dt.isoformat()}."
-                    )
-                    continue
-
-                lbl_start_yr = int(eff_s[:4]) if eff_s else s_dt.year
-                lbl_end_yr = int(eff_e[:4]) if eff_e else e_dt.year
-                rolling_windows.append(
-                    RollingSubWindowResult(
-                        index=len(rolling_windows) + 1,
-                        label=f"{lbl_start_yr} → {lbl_end_yr}",
+            if len(strat_summaries) < len(strategies):
+                reason = "; ".join(sub_errors) if sub_errors else (
+                    f"Estrategias indisponiveis para a janela {req_label}."
+                )
+                last_err = reason
+                skipped_windows.append(
+                    SkippedRollingWindow(
+                        label=req_label,
                         requested_start_date=s_dt.isoformat(),
                         requested_end_date=e_dt.isoformat(),
-                        effective_start_date=eff_s or s_dt.isoformat(),
-                        effective_end_date=eff_e or e_dt.isoformat(),
-                        window_clamped=clamped,
-                        strategies=strat_summaries,
+                        reason=reason,
                     )
                 )
+                continue
+
+            # Require every strategy in the sub-window to span the target calendar horizon
+            # within a small tolerance (14 calendar days) for weekends, holidays, and start probe
+            target_calendar_days = (add_years(s_dt, w_years) - s_dt).days
+            min_required_days = max(1, target_calendar_days - 14)
+            short_strat: tuple[str, PerformanceSummary] | None = None
+            for st_key, st_sum in strat_summaries.items():
+                if st_sum.elapsed_days < min_required_days:
+                    short_strat = (st_key, st_sum)
+                    break
+
+            if short_strat is not None:
+                st_key, st_sum = short_strat
+                reason = (
+                    f"Janela {req_label} descartada: duracao efetiva de '{st_key}' "
+                    f"({st_sum.start_date} a {st_sum.end_date}, {st_sum.elapsed_years:.2f} anos) "
+                    f"inferior ao horizonte de {w_years} {'ano' if w_years == 1 else 'anos'}."
+                )
+                last_err = reason
+                skipped_windows.append(
+                    SkippedRollingWindow(
+                        label=req_label,
+                        requested_start_date=s_dt.isoformat(),
+                        requested_end_date=e_dt.isoformat(),
+                        reason=reason,
+                    )
+                )
+                continue
+
+            rolling_windows.append(
+                RollingSubWindowResult(
+                    index=len(rolling_windows) + 1,
+                    label=req_label,
+                    requested_start_date=s_dt.isoformat(),
+                    requested_end_date=e_dt.isoformat(),
+                    effective_start_date=eff_s or s_dt.isoformat(),
+                    effective_end_date=eff_e or e_dt.isoformat(),
+                    window_clamped=clamped,
+                    strategies=strat_summaries,
+                )
+            )
 
         aggregates = _compute_rolling_aggregates(strategies, rolling_windows)
         comparisons.append(
@@ -728,6 +807,7 @@ def run_multi_window_rolling(
                 base_end_date=effective_base_end.isoformat(),
                 aggregates=aggregates,
                 rolling_windows=rolling_windows,
+                skipped_windows=skipped_windows,
                 error=last_err if not rolling_windows else None,
             )
         )

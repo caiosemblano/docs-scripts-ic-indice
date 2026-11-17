@@ -11,6 +11,7 @@ import {
   YAxis,
 } from 'recharts';
 import {
+  AlertTriangle,
   ArrowUpRight,
   Award,
   Eye,
@@ -42,7 +43,7 @@ export function MultiWindowPanel({
   useEffect(() => {
     if (!data || selectedHorizonYears === null) return;
     const match = data.windows.find((w) => w.window_years === selectedHorizonYears);
-    if (!match || match.window_count === 0) {
+    if (!match || (match.window_count === 0 && (match.skipped_windows?.length ?? 0) === 0)) {
       setSelectedHorizonYears(null);
     }
   }, [data, selectedHorizonYears]);
@@ -94,7 +95,11 @@ export function MultiWindowPanel({
 
   const activeModalEntry: WindowComparisonEntry | undefined =
     selectedHorizonYears !== null
-      ? data.windows.find((w) => w.window_years === selectedHorizonYears && w.window_count > 0)
+      ? data.windows.find(
+          (w) =>
+            w.window_years === selectedHorizonYears &&
+            (w.window_count > 0 || (w.skipped_windows?.length ?? 0) > 0),
+        )
       : undefined;
 
   return (
@@ -267,27 +272,61 @@ export function MultiWindowPanel({
 
                 if (!hasWindows) {
                   const totalCols = 4 + (hasAM ? 4 : 0) + (hasMF ? 4 : 0);
+                  const skippedCount = w.skipped_windows?.length ?? 0;
                   return (
-                    <tr key={w.window_years} className="bg-slate-950/30 text-slate-500">
+                    <tr
+                      key={w.window_years}
+                      onClick={() => skippedCount > 0 && setSelectedHorizonYears(w.window_years)}
+                      className={`bg-slate-950/30 text-slate-500 ${
+                        skippedCount > 0 ? 'cursor-pointer hover:bg-slate-800/30' : ''
+                      }`}
+                    >
                       <td className="px-4 py-3.5 font-semibold text-slate-400">
                         {w.window_years} {w.window_years === 1 ? 'Ano' : 'Anos'}
                       </td>
-                      <td className="px-4 py-3.5">
+                      <td className="px-4 py-3.5 whitespace-nowrap">
                         <span className="rounded bg-slate-800/80 px-2 py-0.5 text-[11px] text-slate-400">
-                          0 janelas
+                          0 de {skippedCount} janelas
                         </span>
+                        {skippedCount > 0 && (
+                          <div className="mt-1 text-[10px] text-amber-400">
+                            {skippedCount} {skippedCount === 1 ? 'descartada' : 'descartadas'}
+                          </div>
+                        )}
                       </td>
-                      <td colSpan={totalCols - 3} className="px-4 py-3.5 text-slate-500">
+                      <td colSpan={totalCols - 3} className="px-4 py-3.5 text-slate-400">
                         {w.error ??
                           `O intervalo selecionado não comporta janelas completas de ${w.window_years} anos.`}
                       </td>
-                      <td className="px-4 py-3.5 text-center text-slate-600">—</td>
+                      <td className="px-4 py-3.5 text-center">
+                        {skippedCount > 0 ? (
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setSelectedHorizonYears(w.window_years);
+                            }}
+                            className="inline-flex items-center gap-1 rounded-lg bg-amber-500/15 px-2.5 py-1 text-[11px] font-semibold text-amber-300 ring-1 ring-amber-500/40 transition hover:bg-amber-500/25"
+                          >
+                            Motivos ({skippedCount})
+                          </button>
+                        ) : (
+                          <span className="text-slate-600">—</span>
+                        )}
+                      </td>
                     </tr>
                   );
                 }
 
                 const firstWin = w.rolling_windows[0];
                 const lastWin = w.rolling_windows[w.rolling_windows.length - 1];
+                const skippedCount = w.skipped_windows?.length ?? 0;
+                const totalCandidateCount = w.window_count + skippedCount;
+                const totalSkippedReb = w.rolling_windows.reduce((acc, rw) => {
+                  const sAm = rw.strategies.acquirers_multiple?.skipped_rebalances ?? 0;
+                  const sMf = rw.strategies.magic_formula?.skipped_rebalances ?? 0;
+                  return acc + sAm + sMf;
+                }, 0);
 
                 return (
                   <tr
@@ -310,6 +349,19 @@ export function MultiWindowPanel({
                           {w.window_count === 1
                             ? firstWin.label
                             : `${firstWin.label.split(' → ')[0]} → ${lastWin.label.split(' → ')[1]}`}
+                        </div>
+                      )}
+                      {skippedCount > 0 && (
+                        <div className="mt-1 inline-flex items-center gap-1 text-[10px] font-medium text-amber-400">
+                          <AlertTriangle className="h-3 w-3" />
+                          {skippedCount} de {totalCandidateCount}{' '}
+                          {skippedCount === 1 ? 'descartada' : 'descartadas'}
+                        </div>
+                      )}
+                      {totalSkippedReb > 0 && (
+                        <div className="mt-0.5 text-[10px] text-amber-300/90">
+                          {totalSkippedReb}{' '}
+                          {totalSkippedReb === 1 ? 'rebalanceamento falhou' : 'rebalanceamentos falharam'}
                         </div>
                       )}
                     </td>
@@ -476,7 +528,7 @@ export function MultiWindowPanel({
               <div className="flex flex-wrap items-center gap-2">
                 <div className="flex rounded-lg border border-slate-800 bg-slate-900 p-1">
                   {data.windows.map((hw) => {
-                    const disabled = hw.window_count === 0;
+                    const disabled = hw.window_count === 0 && (hw.skipped_windows?.length ?? 0) === 0;
                     const active = hw.window_years === activeModalEntry.window_years;
                     return (
                       <button
@@ -551,6 +603,13 @@ function RollingHorizonDetailContent({
   const amAgg = entry.aggregates.acquirers_multiple;
   const mfAgg = entry.aggregates.magic_formula;
   const primaryAgg = amAgg ?? mfAgg;
+  const skippedList = entry.skipped_windows ?? [];
+  const totalCandidateCount = entry.window_count + skippedList.length;
+  const windowsWithSkippedReb = entry.rolling_windows.filter((rw) => {
+    const sAm = rw.strategies.acquirers_multiple?.skipped_rebalances ?? 0;
+    const sMf = rw.strategies.magic_formula?.skipped_rebalances ?? 0;
+    return sAm + sMf > 0;
+  });
 
   const rollingChartData = entry.rolling_windows.map((rw) => {
     const am = rw.strategies.acquirers_multiple;
@@ -568,7 +627,64 @@ function RollingHorizonDetailContent({
 
   return (
     <div className="space-y-6">
-      {/* KPI Highlight Cards */}
+      {/* Skipped Windows Warning Banner */}
+      {skippedList.length > 0 && (
+        <div className="rounded-xl border border-amber-500/40 bg-amber-950/30 p-4 text-xs text-amber-100">
+          <div className="flex items-center gap-2 font-semibold text-amber-300">
+            <AlertTriangle className="h-4 w-4 shrink-0 text-amber-400" />
+            <span>
+              {skippedList.length} de {totalCandidateCount}{' '}
+              {skippedList.length === 1 ? 'janela móvel descartada' : 'janelas móveis descartadas'}{' '}
+              por falta de ativos elegíveis ou horizonte incompleto
+            </span>
+          </div>
+          <ul className="mt-2 max-h-40 space-y-1 overflow-y-auto pl-6 text-[11px] text-amber-200/90 list-disc">
+            {skippedList.map((sw) => (
+              <li key={`${sw.requested_start_date}-${sw.requested_end_date}`}>
+                <strong className="text-amber-100">
+                  {sw.label} ({formatDateBR(sw.requested_start_date)} →{' '}
+                  {formatDateBR(sw.requested_end_date)}):
+                </strong>{' '}
+                {sw.reason}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {/* Skipped Rebalances Warning Banner */}
+      {windowsWithSkippedReb.length > 0 && (
+        <div className="rounded-xl border border-amber-500/30 bg-amber-950/20 p-3.5 text-xs text-amber-200">
+          <div className="flex items-center gap-2 font-semibold text-amber-300">
+            <AlertTriangle className="h-4 w-4 shrink-0 text-amber-400" />
+            <span>
+              Rebalanceamentos sem ativos elegíveis em {windowsWithSkippedReb.length}{' '}
+              {windowsWithSkippedReb.length === 1 ? 'janela' : 'janelas'} (a carteira anterior foi
+              mantida nessas datas):
+            </span>
+          </div>
+          <div className="mt-1.5 flex flex-wrap gap-2 pl-6 text-[11px]">
+            {windowsWithSkippedReb.map((rw) => {
+              const sAm = rw.strategies.acquirers_multiple?.skipped_rebalances ?? 0;
+              const sMf = rw.strategies.magic_formula?.skipped_rebalances ?? 0;
+              return (
+                <span
+                  key={rw.index}
+                  className="rounded bg-amber-500/15 px-2 py-0.5 text-amber-200 ring-1 ring-amber-500/30"
+                >
+                  {rw.label}: {sAm > 0 ? `AM ${sAm}x` : ''}
+                  {sAm > 0 && sMf > 0 ? ' · ' : ''}
+                  {sMf > 0 ? `MF ${sMf}x` : ''}
+                </span>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {entry.window_count > 0 && (
+        <>
+          {/* KPI Highlight Cards */}
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
         <div className="rounded-xl border border-slate-800 bg-slate-950/70 p-4">
           <div className="flex items-center gap-2 text-[11px] font-semibold text-slate-400 uppercase">
@@ -959,6 +1075,8 @@ function RollingHorizonDetailContent({
           </table>
         </div>
       </div>
+        </>
+      )}
     </div>
   );
 }

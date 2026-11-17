@@ -367,3 +367,137 @@ def test_annual_rolling_span_counts_2006_to_2026(tmp_path: Path, monkeypatch: py
     assert agg_1y["median_cagr_pct"] == pytest.approx(float(np.median(cagrs_1y)), abs=1e-3)
     assert agg_1y["min_cagr_pct"] == pytest.approx(min(cagrs_1y), abs=1e-3)
     assert agg_1y["max_cagr_pct"] == pytest.approx(max(cagrs_1y), abs=1e-3)
+
+
+def test_presence_63d_ignores_holiday_rows_and_reaches_63(tmp_path: Path) -> None:
+    """Stocks traded on every real session must reach presence_63d == 63 even with holiday rows in the index."""
+    hol_dir = tmp_path / "holiday_market"
+    hol_dir.mkdir()
+    d_start = date(2023, 1, 2)
+    b_days = [
+        d_start + timedelta(days=i)
+        for i in range(260)
+        if (d_start + timedelta(days=i)).weekday() < 5
+    ]
+    # Mark every 12th weekday as an exchange holiday where local stocks have '-' and only 1 foreign ticker trades
+    holiday_set = {b_days[i] for i in range(10, len(b_days), 12)}
+
+    for idx_t in range(1, 6):
+        t_name = "FULL3" if idx_t == 1 else f"LOC{idx_t}3"
+        rows = [
+            (d, "-" if d in holiday_set else 15.0, 50_000.0, 300_000.0, 20.0)
+            for d in b_days
+        ]
+        _write_economatica_xlsx(
+            hol_dir / f"{t_name}.xlsx",
+            sheet_name=t_name,
+            company_name=f"{t_name} ON",
+            ebitda_months=12,
+            rows=rows,
+        )
+
+    # Foreign-listed ticker trading even on local exchange holidays (1 out of 6 < 20% participation)
+    adr_rows = [(d, 25.0, 50_000.0, 300_000.0, 20.0) for d in b_days]
+    _write_economatica_xlsx(
+        hol_dir / "ARCE.xlsx",
+        sheet_name="ARCE",
+        company_name="Arco Platform Com A",
+        ebitda_months=12,
+        rows=adr_rows,
+    )
+
+    mgr = MarketDataManager(cache_root=tmp_path / ".cache")
+    ds = mgr.load(hol_dir)
+
+    # Ensure holiday rows exist in ds.dates but are excluded from ds.trading_dates
+    assert len(ds.dates) > len(ds.trading_dates)
+
+    # After 70 real trading sessions, FULL3 must have 63/63 presence despite interspersed holidays
+    target_dt = ds.trading_dates[70].date()
+    snap = ds.snapshot_fundamentals(target_dt)
+    assert int(snap.loc[snap["ativo"] == "FULL3", "presence_63d"].iloc[0]) == 63
+
+    # Also verify non-trading holiday row inherits the prior trading row's 63/63 presence
+    late_holidays = [d for d in holiday_set if d > target_dt]
+    assert late_holidays
+    hol_idx = int(ds.dates.get_loc(late_holidays[0].isoformat()))
+    full3_col = ds.ticker_to_idx["FULL3"]
+    assert int(ds.presence_63d[hol_idx, full3_col]) == 63
+
+
+def test_rolling_windows_skip_delayed_start_instead_of_truncating(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Sub-windows without eligible assets near requested_start_date must be placed in skipped_windows, never truncated."""
+    delayed_dir = tmp_path / "delayed_fundamentals"
+    delayed_dir.mkdir()
+    d_start = date(2020, 1, 2)
+    d_end = date(2024, 1, 2)
+    total_days = (d_end - d_start).days + 1
+    b_days = [
+        d_start + timedelta(days=i)
+        for i in range(total_days)
+        if (d_start + timedelta(days=i)).weekday() < 5
+    ]
+
+    # Fundamentals only appear starting 2021-06-01 (~17 months after 2020-01-02)
+    fund_cutoff = date(2021, 6, 1)
+    for ticker, drift in [("LATE3", 0.0004), ("LATE4", 0.0002)]:
+        px = 10.0
+        rows = []
+        for d in b_days:
+            px *= 1.0 + drift
+            has_fund = d >= fund_cutoff
+            rows.append(
+                (
+                    d,
+                    round(px, 4),
+                    60_000.0 if has_fund else "-",
+                    400_000.0,
+                    18.0 if has_fund else "-",
+                )
+            )
+        _write_economatica_xlsx(
+            delayed_dir / f"{ticker}.xlsx",
+            sheet_name=ticker,
+            company_name=ticker,
+            ebitda_months=12,
+            rows=rows,
+        )
+
+    monkeypatch.setenv("DATA_DIR", str(delayed_dir))
+    client = TestClient(app)
+    resp = client.post(
+        "/api/backtest/multi-window",
+        json={
+            "strategies": ["acquirers_multiple", "magic_formula"],
+            "start_date": "2020-01-02",
+            "end_date": "2024-01-02",
+            "windows_years": [1, 3],
+            "portfolio_size": 1,
+            "initial_capital": 10000,
+            "monthly_contribution": 0,
+            "rebalance_frequency": "annual",
+            "deduplicate_issuers": False,
+        },
+    )
+    assert resp.status_code == 200
+    w1, w3 = resp.json()["windows"]
+
+    # 1Y spans: 2020->2021 (no fund), 2021->2022 (first fund in June 2021 > 31d delay),
+    # 2022->2023 (valid), 2023->2024 (valid)
+    assert w1["window_count"] == 2
+    assert len(w1["skipped_windows"]) == 2
+    assert [sw["label"] for sw in w1["skipped_windows"]] == ["2020 → 2021", "2021 → 2022"]
+    for rw in w1["rolling_windows"]:
+        req_s_yr = int(rw["requested_start_date"][:4])
+        req_e_yr = int(rw["requested_end_date"][:4])
+        assert rw["label"] == f"{req_s_yr} → {req_e_yr}"
+        for st_sum in rw["strategies"].values():
+            assert st_sum["elapsed_days"] >= 365 - 14
+
+    # 3Y spans: 2020->2023 and 2021->2024 both lack eligible stocks in Jan 2020 / Jan 2021 -> both skipped (not truncated!)
+    assert w3["window_count"] == 0
+    assert len(w3["skipped_windows"]) == 2
+    assert [sw["label"] for sw in w3["skipped_windows"]] == ["2020 → 2023", "2021 → 2024"]
+
