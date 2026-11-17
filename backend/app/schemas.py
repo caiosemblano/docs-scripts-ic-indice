@@ -65,20 +65,19 @@ class BacktestParametersSchema(BaseModel):
 
 
 class BacktestRunRequest(BacktestParametersSchema):
-    window_mode: Literal["preset", "custom"] = "preset"
-    window_years: int | None = Field(default=10, ge=1, le=50)
+    window_mode: Literal["preset", "custom"] = "custom"
+    window_years: int | None = Field(default=None, ge=1, le=50)
     start_date: date | None = None
 
     @model_validator(mode="after")
     def _validate_window(self) -> BacktestRunRequest:
-        if self.window_mode == "custom" and self.start_date is None:
-            raise ValueError("Informe 'start_date' quando 'window_mode' for 'custom'.")
         if self.window_mode == "preset" and self.window_years is None:
-            self.window_years = 10
+            self.window_years = 20
         return self
 
 
 class MultiWindowRequest(BacktestParametersSchema):
+    start_date: date | None = None
     windows_years: list[int] = Field(
         default_factory=lambda: [1, 3, 5, 10, 15, 20],
         min_length=1,
@@ -166,13 +165,47 @@ class BacktestRunResponse(BaseModel):
     comparison_chart: list[ComparisonChartPointSchema]
 
 
-class WindowComparisonEntrySchema(BaseModel):
-    window_years: int
+class RollingSubWindowSchema(BaseModel):
+    index: int
+    label: str
     requested_start_date: str
+    requested_end_date: str
     effective_start_date: str
     effective_end_date: str
     window_clamped: bool
     strategies: dict[str, PerformanceSummarySchema]
+
+
+class RollingStrategyAggregateSchema(BaseModel):
+    window_count: int
+    positive_cagr_count: int
+    win_rate_pct: float
+    beat_other_count: int | None = None
+    beat_other_pct: float | None = None
+    mean_cagr_pct: float
+    median_cagr_pct: float
+    min_cagr_pct: float
+    max_cagr_pct: float
+    worst_window_label: str
+    best_window_label: str
+    mean_xirr_pct: float | None = None
+    median_xirr_pct: float | None = None
+    mean_total_invested: float
+    mean_final_equity: float
+    median_final_equity: float
+    min_final_equity: float
+    max_final_equity: float
+    mean_max_drawdown_pct: float
+    worst_max_drawdown_pct: float
+
+
+class WindowComparisonEntrySchema(BaseModel):
+    window_years: int
+    window_count: int
+    base_start_date: str
+    base_end_date: str
+    aggregates: dict[str, RollingStrategyAggregateSchema]
+    rolling_windows: list[RollingSubWindowSchema]
     error: str | None = None
 
 

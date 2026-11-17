@@ -17,9 +17,11 @@ import {
   AlertCircle,
   BarChart3,
   Briefcase,
+  Calendar,
   Database,
   Play,
   RefreshCw,
+  RotateCcw,
   ShieldCheck,
   SlidersHorizontal,
   TrendingUp,
@@ -42,16 +44,26 @@ import {
   DatasetSummary,
   MultiWindowResponse,
   PerformanceSummary,
+  RollingSubWindow,
   StrategyName,
 } from './types';
 
-const PRESET_WINDOWS = [1, 3, 5, 10, 15, 20];
+function computeDefaultStartDate(minDateIso: string, maxDateIso: string, yearsBack = 20): string {
+  const parts = maxDateIso.slice(0, 10).split('-').map(Number);
+  if (parts.length !== 3 || parts.some((n) => Number.isNaN(n))) {
+    return minDateIso;
+  }
+  const [y, m, d] = parts;
+  const targetYear = Math.max(1, y - yearsBack);
+  const maxDayInMonth = new Date(targetYear, m, 0).getDate();
+  const safeDay = Math.min(d, maxDayInMonth);
+  const candidate = `${String(targetYear).padStart(4, '0')}-${String(m).padStart(2, '0')}-${String(safeDay).padStart(2, '0')}`;
+  return candidate < minDateIso ? minDateIso : candidate;
+}
 
 const INITIAL_FORM: BacktestFormState = {
   strategies: ['acquirers_multiple', 'magic_formula'],
-  window_mode: 'preset',
-  window_years: 10,
-  start_date: '2016-01-04',
+  start_date: '2006-11-13',
   end_date: '',
   portfolio_size: 20,
   initial_capital: 10000,
@@ -160,9 +172,14 @@ export default function App() {
   const [chartTab, setChartTab] = useState<'equity' | 'twr' | 'drawdown'>('equity');
   const [mainTab, setMainTab] = useState<'multi_window' | 'portfolios' | 'audit'>('multi_window');
   const [showAdvanced, setShowAdvanced] = useState(false);
+  const [inspectedSubWindow, setInspectedSubWindow] = useState<{
+    horizonYears: number;
+    sub: RollingSubWindow;
+  } | null>(null);
 
   const executeSimulation = useCallback(async (targetForm: BacktestFormState) => {
     setError(null);
+    setInspectedSubWindow(null);
     setLoadingRun(true);
     setLoadingMulti(true);
 
@@ -190,7 +207,14 @@ export default function App() {
         const summary = await fetchDatasetSummary(false);
         if (cancelled) return;
         setDataset(summary);
-        await executeSimulation(INITIAL_FORM);
+        const defaultStart = computeDefaultStartDate(summary.min_date, summary.max_date, 20);
+        const initialWithDates: BacktestFormState = {
+          ...INITIAL_FORM,
+          start_date: defaultStart,
+          end_date: '',
+        };
+        setForm(initialWithDates);
+        await executeSimulation(initialWithDates);
       } catch (err) {
         if (!cancelled) {
           setError(err instanceof Error ? err.message : 'Erro ao inicializar aplicação.');
@@ -227,15 +251,27 @@ export default function App() {
     });
   };
 
-  const handleSelectWindowFromMatrix = (years: number) => {
-    const updated: BacktestFormState = {
-      ...form,
-      window_mode: 'preset',
-      window_years: years,
-    };
-    setForm(updated);
+  const handleInspectRollingSubWindow = (horizonYears: number, sub: RollingSubWindow) => {
+    setError(null);
+    setInspectedSubWindow({ horizonYears, sub });
     setLoadingRun(true);
-    runBacktest(updated)
+    runBacktest(form, {
+      start_date: sub.requested_start_date,
+      end_date: sub.requested_end_date,
+    })
+      .then((res) => {
+        setRunData(res);
+        window.scrollTo({ top: 0, behavior: 'smooth' });
+      })
+      .catch((err: Error) => setError(err.message))
+      .finally(() => setLoadingRun(false));
+  };
+
+  const handleRestoreBaseRange = () => {
+    setError(null);
+    setInspectedSubWindow(null);
+    setLoadingRun(true);
+    runBacktest(form)
       .then((res) => setRunData(res))
       .catch((err: Error) => setError(err.message))
       .finally(() => setLoadingRun(false));
@@ -340,73 +376,41 @@ export default function App() {
               </div>
             </div>
 
-            {/* Janela de Tempo */}
+            {/* Período Base da Simulação */}
             <div>
-              <label className="mb-2 block text-xs font-semibold tracking-wider text-slate-300 uppercase">
-                Janela de Tempo
-              </label>
-              <div className="grid grid-cols-3 gap-1.5">
-                {PRESET_WINDOWS.map((yrs) => {
-                  const selected = form.window_mode === 'preset' && form.window_years === yrs;
-                  return (
-                    <button
-                      key={yrs}
-                      type="button"
-                      onClick={() =>
-                        setForm((prev) => ({ ...prev, window_mode: 'preset', window_years: yrs }))
-                      }
-                      className={`rounded-lg py-1.5 text-xs font-semibold transition ${
-                        selected
-                          ? 'bg-emerald-500 text-slate-950'
-                          : 'bg-slate-950 text-slate-300 ring-1 ring-slate-800 hover:bg-slate-800'
-                      }`}
-                    >
-                      {yrs} {yrs === 1 ? 'Ano' : 'Anos'}
-                    </button>
-                  );
-                })}
+              <div className="mb-2 flex items-center gap-2 text-xs font-semibold tracking-wider text-slate-300 uppercase">
+                <Calendar className="h-3.5 w-3.5 text-emerald-400" />
+                <span>Período da Simulação</span>
               </div>
-
-              <button
-                type="button"
-                onClick={() => setForm((prev) => ({ ...prev, window_mode: 'custom' }))}
-                className={`mt-2 w-full rounded-lg py-1.5 text-xs font-semibold transition ${
-                  form.window_mode === 'custom'
-                    ? 'bg-emerald-500 text-slate-950'
-                    : 'bg-slate-950 text-slate-300 ring-1 ring-slate-800 hover:bg-slate-800'
-                }`}
-              >
-                Data Escolhida → Final
-              </button>
-
-              {form.window_mode === 'custom' && (
-                <div className="mt-3 space-y-2.5 rounded-lg border border-slate-800 bg-slate-950/60 p-3">
-                  <div>
-                    <label className="block text-[11px] text-slate-400">Data Inicial</label>
-                    <input
-                      type="date"
-                      value={form.start_date}
-                      min={dataset?.min_date}
-                      max={dataset?.max_date}
-                      onChange={(e) => setForm((prev) => ({ ...prev, start_date: e.target.value }))}
-                      className="mt-1 w-full rounded border border-slate-700 bg-slate-900 px-2.5 py-1.5 text-xs text-slate-100 focus:border-emerald-500 focus:outline-none"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-[11px] text-slate-400">
-                      Data Final (vazio = última da base)
-                    </label>
-                    <input
-                      type="date"
-                      value={form.end_date}
-                      min={dataset?.min_date}
-                      max={dataset?.max_date}
-                      onChange={(e) => setForm((prev) => ({ ...prev, end_date: e.target.value }))}
-                      className="mt-1 w-full rounded border border-slate-700 bg-slate-900 px-2.5 py-1.5 text-xs text-slate-100 focus:border-emerald-500 focus:outline-none"
-                    />
-                  </div>
+              <div className="space-y-2.5 rounded-lg border border-slate-800 bg-slate-950/60 p-3">
+                <div>
+                  <label className="block text-[11px] text-slate-400">Data Inicial</label>
+                  <input
+                    type="date"
+                    value={form.start_date}
+                    min={dataset?.min_date}
+                    max={dataset?.max_date}
+                    onChange={(e) => setForm((prev) => ({ ...prev, start_date: e.target.value }))}
+                    className="mt-1 w-full rounded border border-slate-700 bg-slate-900 px-2.5 py-1.5 text-xs text-slate-100 focus:border-emerald-500 focus:outline-none"
+                  />
                 </div>
-              )}
+                <div>
+                  <label className="block text-[11px] text-slate-400">
+                    Data Final (vazio = última da base)
+                  </label>
+                  <input
+                    type="date"
+                    value={form.end_date}
+                    min={dataset?.min_date}
+                    max={dataset?.max_date}
+                    onChange={(e) => setForm((prev) => ({ ...prev, end_date: e.target.value }))}
+                    className="mt-1 w-full rounded border border-slate-700 bg-slate-900 px-2.5 py-1.5 text-xs text-slate-100 focus:border-emerald-500 focus:outline-none"
+                  />
+                </div>
+                <p className="text-[11px] leading-relaxed text-slate-500">
+                  As janelas móveis anuais de <strong className="text-slate-300">1, 3, 5, 10, 15 e 20 anos</strong> são calculadas automaticamente dentro deste intervalo.
+                </p>
+              </div>
             </div>
 
             {/* Capital Inicial & Aportes Mensais */}
@@ -636,13 +640,23 @@ export default function App() {
                   </div>
 
                   <div>
-                    <label className="block text-[11px] text-slate-400">
-                      Liquidez Mínima (pregões últimos 63d): {form.min_presence_63d}
-                    </label>
+                    <div className="flex items-center justify-between text-[11px]">
+                      <label className="text-slate-400">
+                        Presença Mínima em Pregão (Liquidez)
+                      </label>
+                      <span className="font-semibold text-emerald-400">
+                        {form.min_presence_63d === 0
+                          ? 'Sem filtro (0/63)'
+                          : `${form.min_presence_63d} de 63 pregões (${Math.round(
+                              (form.min_presence_63d / 63) * 100
+                            )}%)`}
+                      </span>
+                    </div>
                     <input
                       type="range"
                       min={0}
-                      max={60}
+                      max={63}
+                      step={1}
                       value={form.min_presence_63d}
                       onChange={(e) =>
                         setForm((prev) => ({
@@ -650,8 +664,16 @@ export default function App() {
                           min_presence_63d: Number(e.target.value),
                         }))
                       }
-                      className="mt-1 w-full accent-emerald-500"
+                      className="mt-1.5 w-full accent-emerald-500"
                     />
+                    <div className="mt-0.5 flex justify-between text-[10px] text-slate-500">
+                      <span>0 pregões</span>
+                      <span>63 pregões (~3 meses úteis)</span>
+                    </div>
+                    <p className="mt-1 text-[10px] leading-relaxed text-slate-500">
+                      Unidade: <strong className="text-slate-400">nº de pregões com cotação válida</strong>{' '}
+                      nos últimos 63 dias úteis (não é volume financeiro em R$).
+                    </p>
                   </div>
                 </div>
               )}
@@ -674,6 +696,29 @@ export default function App() {
             <div className="flex items-start gap-3 rounded-xl border border-rose-500/40 bg-rose-950/30 p-4 text-sm text-rose-200">
               <AlertCircle className="mt-0.5 h-5 w-5 shrink-0 text-rose-400" />
               <div>{error}</div>
+            </div>
+          )}
+
+          {inspectedSubWindow && (
+            <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-emerald-500/40 bg-emerald-950/25 px-4 py-3 text-xs text-emerald-200">
+              <div>
+                <span className="font-semibold">
+                  Inspecionando janela móvel de {inspectedSubWindow.horizonYears}{' '}
+                  {inspectedSubWindow.horizonYears === 1 ? 'ano' : 'anos'} (#
+                  {inspectedSubWindow.sub.index}):
+                </span>{' '}
+                {formatDateBR(inspectedSubWindow.sub.effective_start_date)} →{' '}
+                {formatDateBR(inspectedSubWindow.sub.effective_end_date)}
+              </div>
+              <button
+                type="button"
+                onClick={handleRestoreBaseRange}
+                className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-500/20 px-3 py-1.5 font-semibold text-emerald-200 ring-1 ring-emerald-500/40 transition hover:bg-emerald-500/30"
+              >
+                <RotateCcw className="h-3.5 w-3.5" />
+                Voltar ao período completo ({formatDateBR(form.start_date)} →{' '}
+                {formatDateBR(form.end_date || dataset?.max_date)})
+              </button>
             </div>
           )}
 
@@ -701,9 +746,15 @@ export default function App() {
                     {chartTab === 'drawdown' && 'Drawdown Histórico (% abaixo do topo)'}
                   </h2>
                   <p className="text-xs text-slate-400">
-                    {form.window_mode === 'preset'
-                      ? `Janela ativa: ${form.window_years} ${form.window_years === 1 ? 'Ano' : 'Anos'}`
-                      : 'Janela personalizada ativa'}
+                    {inspectedSubWindow
+                      ? `Janela móvel selecionada (${inspectedSubWindow.horizonYears} ${
+                          inspectedSubWindow.horizonYears === 1 ? 'Ano' : 'Anos'
+                        }): ${formatDateBR(
+                          inspectedSubWindow.sub.effective_start_date,
+                        )} → ${formatDateBR(inspectedSubWindow.sub.effective_end_date)}`
+                      : `Período base selecionado: ${formatDateBR(form.start_date)} → ${formatDateBR(
+                          form.end_date || dataset?.max_date,
+                        )}`}
                   </p>
                 </div>
 
@@ -920,7 +971,7 @@ export default function App() {
               }`}
             >
               <BarChart3 className="h-4 w-4" />
-              Comparativo 1, 3, 5, 10, 15 e 20 Anos
+              Janelas Móveis Anuais (1, 3, 5, 10, 15 e 20 Anos)
             </button>
 
             <button
@@ -959,8 +1010,8 @@ export default function App() {
             <MultiWindowPanel
               data={multiWindowData}
               loading={loadingMulti}
-              activeWindowYears={form.window_mode === 'preset' ? form.window_years : null}
-              onSelectWindow={handleSelectWindowFromMatrix}
+              inspectedSubWindow={inspectedSubWindow}
+              onInspectSubWindow={handleInspectRollingSubWindow}
             />
           )}
 

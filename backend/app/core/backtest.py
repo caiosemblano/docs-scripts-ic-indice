@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import calendar
-from dataclasses import dataclass
-from datetime import date
+from dataclasses import dataclass, replace
+from datetime import date, timedelta
 from typing import Literal
 
 import numpy as np
@@ -35,6 +35,39 @@ def subtract_years(anchor: date, years: int) -> date:
     target_year = max(1, anchor.year - years)
     max_day = calendar.monthrange(target_year, anchor.month)[1]
     return date(target_year, anchor.month, min(anchor.day, max_day))
+
+
+def add_years(anchor: date, years: int) -> date:
+    target_year = max(1, anchor.year + years)
+    max_day = calendar.monthrange(target_year, anchor.month)[1]
+    return date(target_year, anchor.month, min(anchor.day, max_day))
+
+
+def generate_annual_rolling_spans(
+    base_start: date,
+    base_end: date,
+    window_years: int,
+    *,
+    end_tolerance_days: int = 7,
+) -> list[tuple[date, date]]:
+    """Generate annual rolling ``(start_date, end_date)`` pairs of length ``window_years`` within ``[base_start, base_end]``."""
+    if window_years <= 0 or base_start >= base_end:
+        return []
+
+    max_allowed_end = base_end + timedelta(days=max(0, end_tolerance_days))
+    spans: list[tuple[date, date]] = []
+    step_years = 0
+    while True:
+        win_start = add_years(base_start, step_years)
+        target_end = add_years(win_start, window_years)
+        if target_end > max_allowed_end:
+            break
+        win_end = min(target_end, base_end)
+        if win_end <= win_start:
+            break
+        spans.append((win_start, win_end))
+        step_years += 1
+    return spans
 
 
 def add_months(anchor: date, months: int) -> date:
@@ -147,6 +180,7 @@ def run_strategy_backtest(
     *,
     include_curve: bool = True,
     include_rebalances: bool = True,
+    ranking_cache: dict[tuple[StrategyName, date], list[RankedHolding]] | None = None,
 ) -> StrategyBacktestResult:
     """Execute daily mark-to-market simulation with configurable rebalancing and monthly DCA."""
     row_indices, req_start, window_clamped = resolve_window_row_indices(dataset, config)
@@ -156,15 +190,15 @@ def run_strategy_backtest(
     total_trading_rows = len(dataset.trading_dates)
     eff_min_presence = min(config.min_presence_63d, max(0, total_trading_rows // 3))
 
-    # Locate the first trading day in the window that yields >=1 eligible stock
-    first_valid_offset: int | None = None
-    initial_holdings: list[RankedHolding] = []
-    probe_step = 1 if len(row_indices) <= 60 else 5
-
-    for offset in range(0, len(row_indices) - 1, probe_step):
-        cand_holdings = rank_dataset_on_date(
+    def _rank_on_date(dt: date) -> list[RankedHolding]:
+        if ranking_cache is not None:
+            cache_key = (strategy, dt)
+            cached = ranking_cache.get(cache_key)
+            if cached is not None:
+                return cached
+        res_holdings = rank_dataset_on_date(
             dataset,
-            all_sim_dates[offset],
+            dt,
             strategy,
             config.portfolio_size,
             ebitda_mode=config.ebitda_mode,
@@ -175,23 +209,22 @@ def run_strategy_backtest(
             require_positive_ebitda=config.require_positive_ebitda,
             min_presence_63d=eff_min_presence,
         )
+        if ranking_cache is not None:
+            ranking_cache[(strategy, dt)] = res_holdings
+        return res_holdings
+
+    # Locate the first trading day in the window that yields >=1 eligible stock
+    first_valid_offset: int | None = None
+    initial_holdings: list[RankedHolding] = []
+    probe_step = 1 if len(row_indices) <= 60 else 5
+
+    for offset in range(0, len(row_indices) - 1, probe_step):
+        cand_holdings = _rank_on_date(all_sim_dates[offset])
         if cand_holdings:
             # Refine exact day if probe_step > 1
             exact_offset = offset
             for back in range(max(0, offset - probe_step + 1), offset + 1):
-                chk = rank_dataset_on_date(
-                    dataset,
-                    all_sim_dates[back],
-                    strategy,
-                    config.portfolio_size,
-                    ebitda_mode=config.ebitda_mode,
-                    reporting_lag_days=config.reporting_lag_days,
-                    deduplicate_issuers=config.deduplicate_issuers,
-                    exclude_ebitda_12m_files=config.exclude_ebitda_12m_files,
-                    require_valid_price=True,
-                    require_positive_ebitda=config.require_positive_ebitda,
-                    min_presence_63d=eff_min_presence,
-                )
+                chk = _rank_on_date(all_sim_dates[back])
                 if chk:
                     exact_offset = back
                     cand_holdings = chk
@@ -255,7 +288,7 @@ def run_strategy_backtest(
             px = float(prices_ffill[row_i, c_idx])
             if np.isfinite(px) and px > 0.0:
                 new_idx_list.append(c_idx)
-                valid_holdings.append(h)
+                valid_holdings.append(replace(h))
 
         if not valid_holdings:
             cash = total_equity
@@ -394,19 +427,7 @@ def run_strategy_backtest(
         # 3. Scheduled portfolio rebalance (if due)
         did_rebalance = False
         if next_rebalance_dt is not None and dt >= next_rebalance_dt:
-            new_holdings = rank_dataset_on_date(
-                dataset,
-                dt,
-                strategy,
-                config.portfolio_size,
-                ebitda_mode=config.ebitda_mode,
-                reporting_lag_days=config.reporting_lag_days,
-                deduplicate_issuers=config.deduplicate_issuers,
-                exclude_ebitda_12m_files=config.exclude_ebitda_12m_files,
-                require_valid_price=True,
-                require_positive_ebitda=config.require_positive_ebitda,
-                min_presence_63d=eff_min_presence,
-            )
+            new_holdings = _rank_on_date(dt)
             if new_holdings:
                 _apply_rebalance(day_idx, dt, new_holdings)
                 did_rebalance = True
@@ -466,3 +487,249 @@ def run_strategy_backtest(
         curve=curve,
         rebalances=rebalances if include_rebalances else [],
     )
+
+
+@dataclass(slots=True)
+class RollingSubWindowResult:
+    index: int
+    label: str
+    requested_start_date: str
+    requested_end_date: str
+    effective_start_date: str
+    effective_end_date: str
+    window_clamped: bool
+    strategies: dict[StrategyName, PerformanceSummary]
+
+
+@dataclass(slots=True)
+class RollingStrategyAggregate:
+    window_count: int
+    positive_cagr_count: int
+    win_rate_pct: float
+    beat_other_count: int | None
+    beat_other_pct: float | None
+    mean_cagr_pct: float
+    median_cagr_pct: float
+    min_cagr_pct: float
+    max_cagr_pct: float
+    worst_window_label: str
+    best_window_label: str
+    mean_xirr_pct: float | None
+    median_xirr_pct: float | None
+    mean_total_invested: float
+    mean_final_equity: float
+    median_final_equity: float
+    min_final_equity: float
+    max_final_equity: float
+    mean_max_drawdown_pct: float
+    worst_max_drawdown_pct: float
+
+
+@dataclass(slots=True)
+class RollingHorizonComparison:
+    window_years: int
+    window_count: int
+    base_start_date: str
+    base_end_date: str
+    aggregates: dict[StrategyName, RollingStrategyAggregate]
+    rolling_windows: list[RollingSubWindowResult]
+    error: str | None = None
+
+
+def _compute_rolling_aggregates(
+    strategies: list[StrategyName],
+    rolling_windows: list[RollingSubWindowResult],
+) -> dict[StrategyName, RollingStrategyAggregate]:
+    aggregates: dict[StrategyName, RollingStrategyAggregate] = {}
+    has_both = "acquirers_multiple" in strategies and "magic_formula" in strategies
+
+    for strat in strategies:
+        items: list[tuple[str, PerformanceSummary]] = [
+            (rw.label, rw.strategies[strat]) for rw in rolling_windows if strat in rw.strategies
+        ]
+        if not items:
+            continue
+
+        n = len(items)
+        cagrs = np.array([s.cagr_pct for _, s in items], dtype=np.float64)
+        equities = np.array([s.final_equity for _, s in items], dtype=np.float64)
+        invested = np.array([s.total_invested for _, s in items], dtype=np.float64)
+        drawdowns = np.array([s.max_drawdown_pct for _, s in items], dtype=np.float64)
+        xirrs = [s.xirr_pct for _, s in items if s.xirr_pct is not None]
+
+        pos_count = int(np.sum(cagrs > 0.0))
+        win_rate = round((pos_count / n) * 100.0, 2)
+
+        min_idx = int(np.argmin(cagrs))
+        max_idx = int(np.argmax(cagrs))
+
+        beat_count: int | None = None
+        beat_pct: float | None = None
+        if has_both:
+            other: StrategyName = (
+                "magic_formula" if strat == "acquirers_multiple" else "acquirers_multiple"
+            )
+            paired = [
+                (rw.strategies[strat].cagr_pct, rw.strategies[other].cagr_pct)
+                for rw in rolling_windows
+                if strat in rw.strategies and other in rw.strategies
+            ]
+            if paired:
+                wins = sum(1 for a, b in paired if a > b)
+                beat_count = wins
+                beat_pct = round((wins / len(paired)) * 100.0, 2)
+
+        xirr_arr = np.array(xirrs, dtype=np.float64) if xirrs else None
+
+        aggregates[strat] = RollingStrategyAggregate(
+            window_count=n,
+            positive_cagr_count=pos_count,
+            win_rate_pct=win_rate,
+            beat_other_count=beat_count,
+            beat_other_pct=beat_pct,
+            mean_cagr_pct=round(float(np.mean(cagrs)), 4),
+            median_cagr_pct=round(float(np.median(cagrs)), 4),
+            min_cagr_pct=round(float(cagrs[min_idx]), 4),
+            max_cagr_pct=round(float(cagrs[max_idx]), 4),
+            worst_window_label=items[min_idx][0],
+            best_window_label=items[max_idx][0],
+            mean_xirr_pct=round(float(np.mean(xirr_arr)), 4) if xirr_arr is not None else None,
+            median_xirr_pct=round(float(np.median(xirr_arr)), 4) if xirr_arr is not None else None,
+            mean_total_invested=round(float(np.mean(invested)), 2),
+            mean_final_equity=round(float(np.mean(equities)), 2),
+            median_final_equity=round(float(np.median(equities)), 2),
+            min_final_equity=round(float(np.min(equities)), 2),
+            max_final_equity=round(float(np.max(equities)), 2),
+            mean_max_drawdown_pct=round(float(np.mean(drawdowns)), 4),
+            worst_max_drawdown_pct=round(float(np.min(drawdowns)), 4),
+        )
+
+    return aggregates
+
+
+def run_multi_window_rolling(
+    dataset: MarketDataset,
+    strategies: list[StrategyName],
+    base_config: BacktestConfig,
+    windows_years: list[int],
+) -> list[RollingHorizonComparison]:
+    """Compute annual rolling windows for each horizon in ``windows_years`` inside ``[start_date, end_date]``."""
+    if len(dataset.trading_dates) < 2:
+        raise ValueError("A base de dados precisa conter precos de fechamento em pelo menos 2 pregoes.")
+
+    end_target = base_config.end_date or dataset.max_date
+    end_pos = int(dataset.trading_dates.searchsorted(np.datetime64(end_target), side="right")) - 1
+    if end_pos < 1:
+        raise ValueError(f"Data final ({end_target.isoformat()}) anterior ao inicio dos pregoes na base.")
+    effective_base_end = dataset.trading_dates[end_pos].date()
+
+    if base_config.start_date is not None:
+        req_base_start = base_config.start_date
+    elif base_config.window_years is not None:
+        req_base_start = subtract_years(effective_base_end, base_config.window_years)
+    else:
+        req_base_start = max(dataset.min_date, subtract_years(effective_base_end, 20))
+
+    start_pos = int(dataset.trading_dates.searchsorted(np.datetime64(req_base_start), side="left"))
+    if start_pos >= end_pos:
+        raise ValueError(
+            f"Janela invalida: data inicial ({req_base_start.isoformat()}) >= data final ({effective_base_end.isoformat()})."
+        )
+    anchor_start = max(req_base_start, dataset.min_date)
+    effective_base_start = dataset.trading_dates[start_pos].date()
+
+    ranking_cache: dict[tuple[StrategyName, date], list[RankedHolding]] = {}
+    comparisons: list[RollingHorizonComparison] = []
+
+    for w_years in windows_years:
+        spans = generate_annual_rolling_spans(anchor_start, effective_base_end, w_years)
+        if not spans:
+            comparisons.append(
+                RollingHorizonComparison(
+                    window_years=w_years,
+                    window_count=0,
+                    base_start_date=effective_base_start.isoformat(),
+                    base_end_date=effective_base_end.isoformat(),
+                    aggregates={},
+                    rolling_windows=[],
+                    error=(
+                        f"Intervalo selecionado ({effective_base_start.year}→{effective_base_end.year}) "
+                        f"menor que {w_years} {'ano' if w_years == 1 else 'anos'}."
+                    ),
+                )
+            )
+            continue
+
+        rolling_windows: list[RollingSubWindowResult] = []
+        last_err: str | None = None
+
+        for idx, (s_dt, e_dt) in enumerate(spans, start=1):
+            sub_cfg = replace(
+                base_config,
+                window_years=None,
+                start_date=s_dt,
+                end_date=e_dt,
+            )
+            strat_summaries: dict[StrategyName, PerformanceSummary] = {}
+            eff_s = ""
+            eff_e = ""
+            clamped = False
+
+            for strat in strategies:
+                try:
+                    res = run_strategy_backtest(
+                        dataset,
+                        strat,
+                        sub_cfg,
+                        include_curve=False,
+                        include_rebalances=False,
+                        ranking_cache=ranking_cache,
+                    )
+                    strat_summaries[strat] = res.summary
+                    if not eff_s or res.effective_start_date < eff_s:
+                        eff_s = res.effective_start_date
+                    if not eff_e or res.effective_end_date > eff_e:
+                        eff_e = res.effective_end_date
+                    clamped = clamped or res.window_clamped
+                except ValueError as exc:
+                    last_err = str(exc)
+
+            if strat_summaries:
+                # Skip sub-window if clamping truncated actual duration below 60% of target horizon
+                ref_summary = next(iter(strat_summaries.values()))
+                if ref_summary.elapsed_years < (w_years * 0.6):
+                    last_err = (
+                        f"Dados fundamentalistas insuficientes para completar {w_years} anos "
+                        f"a partir de {s_dt.isoformat()}."
+                    )
+                    continue
+
+                lbl_start_yr = int(eff_s[:4]) if eff_s else s_dt.year
+                lbl_end_yr = int(eff_e[:4]) if eff_e else e_dt.year
+                rolling_windows.append(
+                    RollingSubWindowResult(
+                        index=len(rolling_windows) + 1,
+                        label=f"{lbl_start_yr} → {lbl_end_yr}",
+                        requested_start_date=s_dt.isoformat(),
+                        requested_end_date=e_dt.isoformat(),
+                        effective_start_date=eff_s or s_dt.isoformat(),
+                        effective_end_date=eff_e or e_dt.isoformat(),
+                        window_clamped=clamped,
+                        strategies=strat_summaries,
+                    )
+                )
+
+        aggregates = _compute_rolling_aggregates(strategies, rolling_windows)
+        comparisons.append(
+            RollingHorizonComparison(
+                window_years=w_years,
+                window_count=len(rolling_windows),
+                base_start_date=effective_base_start.isoformat(),
+                base_end_date=effective_base_end.isoformat(),
+                aggregates=aggregates,
+                rolling_windows=rolling_windows,
+                error=last_err if not rolling_windows else None,
+            )
+        )
+
+    return comparisons
