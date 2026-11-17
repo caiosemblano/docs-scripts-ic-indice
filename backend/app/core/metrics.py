@@ -29,6 +29,7 @@ class PerformanceSummary:
     max_drawdown_pct: float
     sharpe_ratio: float | None
     rebalances_count: int
+    skipped_rebalances: int = 0
 
 
 def compute_xirr(cashflows: list[tuple[date, float]], max_iter: int = 100) -> float | None:
@@ -127,6 +128,7 @@ def build_performance_summary(
     monthly_contribution: float,
     contributions_count: int,
     rebalances_count: int,
+    skipped_rebalances: int = 0,
     risk_free_rate_annual: float = 0.0,
 ) -> PerformanceSummary:
     start_d = dates[0]
@@ -191,4 +193,5 @@ def build_performance_summary(
         max_drawdown_pct=round(max_dd_pct, 4),
         sharpe_ratio=round(sharpe, 4) if sharpe is not None else None,
         rebalances_count=rebalances_count,
+        skipped_rebalances=skipped_rebalances,
     )
