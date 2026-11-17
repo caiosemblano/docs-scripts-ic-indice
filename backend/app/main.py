@@ -13,7 +13,13 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
-from backend.app.core.backtest import BacktestConfig, StrategyBacktestResult, run_strategy_backtest
+from backend.app.core.backtest import (
+    BacktestConfig,
+    StrategyBacktestResult,
+    run_multi_window_rolling,
+    run_strategy_backtest,
+    subtract_years,
+)
 from backend.app.core.data_loader import MarketDataset, default_data_manager
 from backend.app.schemas import (
     AuditRecordSchema,
@@ -25,6 +31,8 @@ from backend.app.schemas import (
     MultiWindowRequest,
     MultiWindowResponse,
     PerformanceSummarySchema,
+    RollingStrategyAggregateSchema,
+    RollingSubWindowSchema,
     StrategyResultSchema,
     WindowComparisonEntrySchema,
 )
@@ -151,14 +159,23 @@ def download_reexport_12m_csv() -> StreamingResponse:
 @app.post("/api/backtest/run", response_model=BacktestRunResponse)
 def run_backtest_endpoint(payload: BacktestRunRequest) -> BacktestRunResponse:
     dataset = get_dataset(force_rebuild=False)
+    end_anchor = payload.end_date or dataset.max_date
+    resolved_start = payload.start_date
+    resolved_years: int | None = None
+    if payload.window_mode == "preset":
+        resolved_years = payload.window_years
+        resolved_start = None
+    elif resolved_start is None:
+        resolved_start = max(dataset.min_date, subtract_years(end_anchor, 20))
+
     cfg = BacktestConfig(
         portfolio_size=payload.portfolio_size,
         initial_capital=payload.initial_capital,
         monthly_contribution=payload.monthly_contribution,
         contribution_mode=payload.contribution_mode,
         rebalance_frequency=payload.rebalance_frequency,
-        window_years=payload.window_years if payload.window_mode == "preset" else None,
-        start_date=payload.start_date if payload.window_mode == "custom" else None,
+        window_years=resolved_years,
+        start_date=resolved_start,
         end_date=payload.end_date,
         ebitda_mode=payload.ebitda_mode,
         reporting_lag_days=payload.reporting_lag_days,
@@ -199,60 +216,63 @@ def run_backtest_endpoint(payload: BacktestRunRequest) -> BacktestRunResponse:
 @app.post("/api/backtest/multi-window", response_model=MultiWindowResponse)
 def run_multi_window_endpoint(payload: MultiWindowRequest) -> MultiWindowResponse:
     dataset = get_dataset(force_rebuild=False)
-    entries: list[WindowComparisonEntrySchema] = []
+    base_cfg = BacktestConfig(
+        portfolio_size=payload.portfolio_size,
+        initial_capital=payload.initial_capital,
+        monthly_contribution=payload.monthly_contribution,
+        contribution_mode=payload.contribution_mode,
+        rebalance_frequency=payload.rebalance_frequency,
+        window_years=None,
+        start_date=payload.start_date,
+        end_date=payload.end_date,
+        ebitda_mode=payload.ebitda_mode,
+        reporting_lag_days=payload.reporting_lag_days,
+        deduplicate_issuers=payload.deduplicate_issuers,
+        exclude_ebitda_12m_files=payload.exclude_ebitda_12m_files,
+        require_positive_ebitda=payload.require_positive_ebitda,
+        min_presence_63d=payload.min_presence_63d,
+        risk_free_rate_annual=payload.risk_free_rate_annual,
+    )
 
-    for w in payload.windows_years:
-        cfg = BacktestConfig(
-            portfolio_size=payload.portfolio_size,
-            initial_capital=payload.initial_capital,
-            monthly_contribution=payload.monthly_contribution,
-            contribution_mode=payload.contribution_mode,
-            rebalance_frequency=payload.rebalance_frequency,
-            window_years=w,
-            start_date=None,
-            end_date=payload.end_date,
-            ebitda_mode=payload.ebitda_mode,
-            reporting_lag_days=payload.reporting_lag_days,
-            deduplicate_issuers=payload.deduplicate_issuers,
-            exclude_ebitda_12m_files=payload.exclude_ebitda_12m_files,
-            require_positive_ebitda=payload.require_positive_ebitda,
-            min_presence_63d=payload.min_presence_63d,
-            risk_free_rate_annual=payload.risk_free_rate_annual,
+    try:
+        comparisons = run_multi_window_rolling(
+            dataset=dataset,
+            strategies=payload.strategies,
+            base_config=base_cfg,
+            windows_years=payload.windows_years,
         )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-        strat_summaries: dict[str, PerformanceSummarySchema] = {}
-        req_start = ""
-        eff_start = ""
-        eff_end = ""
-        clamped = False
-        err_msg: str | None = None
-
-        for strat in payload.strategies:
-            try:
-                res = run_strategy_backtest(
-                    dataset,
-                    strat,
-                    cfg,
-                    include_curve=False,
-                    include_rebalances=False,
-                )
-                strat_summaries[strat] = PerformanceSummarySchema(**asdict(res.summary))
-                req_start = res.requested_start_date
-                eff_start = res.effective_start_date
-                eff_end = res.effective_end_date
-                clamped = clamped or res.window_clamped
-            except ValueError as exc:
-                err_msg = str(exc)
-
+    entries: list[WindowComparisonEntrySchema] = []
+    for comp in comparisons:
         entries.append(
             WindowComparisonEntrySchema(
-                window_years=w,
-                requested_start_date=req_start,
-                effective_start_date=eff_start,
-                effective_end_date=eff_end,
-                window_clamped=clamped,
-                strategies=strat_summaries,
-                error=err_msg if not strat_summaries else None,
+                window_years=comp.window_years,
+                window_count=comp.window_count,
+                base_start_date=comp.base_start_date,
+                base_end_date=comp.base_end_date,
+                aggregates={
+                    k: RollingStrategyAggregateSchema(**asdict(v))
+                    for k, v in comp.aggregates.items()
+                },
+                rolling_windows=[
+                    RollingSubWindowSchema(
+                        index=rw.index,
+                        label=rw.label,
+                        requested_start_date=rw.requested_start_date,
+                        requested_end_date=rw.requested_end_date,
+                        effective_start_date=rw.effective_start_date,
+                        effective_end_date=rw.effective_end_date,
+                        window_clamped=rw.window_clamped,
+                        strategies={
+                            sk: PerformanceSummarySchema(**asdict(sv))
+                            for sk, sv in rw.strategies.items()
+                        },
+                    )
+                    for rw in comp.rolling_windows
+                ],
+                error=comp.error,
             )
         )
 

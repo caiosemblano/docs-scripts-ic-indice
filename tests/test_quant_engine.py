@@ -10,7 +10,11 @@ import numpy as np
 import openpyxl
 import pytest
 
-from backend.app.core.backtest import BacktestConfig, run_strategy_backtest
+from backend.app.core.backtest import (
+    BacktestConfig,
+    generate_annual_rolling_spans,
+    run_strategy_backtest,
+)
 from backend.app.core.data_loader import MarketDataManager
 from backend.app.core.metrics import compute_xirr
 from backend.app.main import app
@@ -247,7 +251,8 @@ def test_fastapi_endpoints_with_custom_and_preset_windows(tmp_path: Path, monkey
         "/api/backtest/multi-window",
         json={
             "strategies": ["acquirers_multiple", "magic_formula"],
-            "windows_years": [1, 3],
+            "start_date": "2023-01-02",
+            "windows_years": [1, 3, 5],
             "portfolio_size": 2,
             "initial_capital": 5000,
             "monthly_contribution": 250,
@@ -255,4 +260,110 @@ def test_fastapi_endpoints_with_custom_and_preset_windows(tmp_path: Path, monkey
         },
     )
     assert r_mw.status_code == 200
-    assert len(r_mw.json()["windows"]) == 2
+    mw_windows = r_mw.json()["windows"]
+    assert len(mw_windows) == 3
+
+    w1, w3, w5 = mw_windows[0], mw_windows[1], mw_windows[2]
+    assert w1["window_years"] == 1
+    assert w1["window_count"] >= 1
+    assert len(w1["rolling_windows"]) == w1["window_count"]
+    assert "acquirers_multiple" in w1["aggregates"]
+    assert "magic_formula" in w1["aggregates"]
+
+    # Synthetic dataset spans ~3 years total (~2022-01 to ~2025-01); starting at 2023-01-02 leaves ~2 years
+    assert w3["window_years"] == 3
+    assert w3["window_count"] == 0
+    assert w5["window_years"] == 5
+    assert w5["window_count"] == 0
+
+    # Verify that cached rolling sub-window summary matches an isolated run_strategy_backtest call
+    first_sub = w1["rolling_windows"][0]
+    r_sub_check = client.post(
+        "/api/backtest/run",
+        json={
+            "strategies": ["acquirers_multiple", "magic_formula"],
+            "window_mode": "custom",
+            "start_date": first_sub["requested_start_date"],
+            "end_date": first_sub["requested_end_date"],
+            "portfolio_size": 2,
+            "initial_capital": 5000,
+            "monthly_contribution": 250,
+            "rebalance_frequency": "annual",
+        },
+    )
+    assert r_sub_check.status_code == 200
+    isolated_am = r_sub_check.json()["results"]["acquirers_multiple"]["summary"]
+    rolling_am = first_sub["strategies"]["acquirers_multiple"]
+    assert rolling_am["final_equity"] == pytest.approx(isolated_am["final_equity"], rel=1e-6)
+    assert rolling_am["cagr_pct"] == pytest.approx(isolated_am["cagr_pct"], abs=1e-4)
+
+
+def test_annual_rolling_span_counts_2006_to_2026(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Validate exact annual rolling window counts (20, 18, 16, 11, 6, 1) and aggregates over a 20-year span."""
+    s = date(2006, 11, 13)
+    e = date(2026, 11, 13)
+    assert len(generate_annual_rolling_spans(s, e, 1)) == 20
+    assert len(generate_annual_rolling_spans(s, e, 3)) == 18
+    assert len(generate_annual_rolling_spans(s, e, 5)) == 16
+    assert len(generate_annual_rolling_spans(s, e, 10)) == 11
+    assert len(generate_annual_rolling_spans(s, e, 15)) == 6
+    assert len(generate_annual_rolling_spans(s, e, 20)) == 1
+
+    # Also test rolling aggregation over a 4-year synthetic dataset (4x 1Y, 2x 3Y, 0x 5Y)
+    four_yr_dir = tmp_path / "four_year_market"
+    four_yr_dir.mkdir()
+    d_start = date(2020, 1, 2)
+    d_end = date(2024, 1, 2)
+    total_days = (d_end - d_start).days + 1
+    b_days = [
+        d_start + timedelta(days=i)
+        for i in range(total_days)
+        if (d_start + timedelta(days=i)).weekday() < 5
+    ]
+
+    for ticker, drift, eb, ev, roic in [
+        ("WINN3", 0.0005, 80_000.0, 400_000.0, 22.0),
+        ("SLOW3", 0.0002, 40_000.0, 500_000.0, 12.0),
+    ]:
+        px = 10.0
+        rows = []
+        for d in b_days:
+            px *= 1.0 + drift
+            rows.append((d, round(px, 4), eb, ev, roic))
+        _write_economatica_xlsx(
+            four_yr_dir / f"{ticker}.xlsx",
+            sheet_name=ticker,
+            company_name=ticker,
+            ebitda_months=12,
+            rows=rows,
+        )
+
+    monkeypatch.setenv("DATA_DIR", str(four_yr_dir))
+    client = TestClient(app)
+    resp = client.post(
+        "/api/backtest/multi-window",
+        json={
+            "strategies": ["acquirers_multiple", "magic_formula"],
+            "start_date": "2020-01-02",
+            "end_date": "2024-01-02",
+            "windows_years": [1, 3, 5],
+            "portfolio_size": 1,
+            "initial_capital": 10000,
+            "monthly_contribution": 0,
+            "rebalance_frequency": "annual",
+        },
+    )
+    assert resp.status_code == 200
+    wins = resp.json()["windows"]
+    assert wins[0]["window_count"] == 4  # 2020->2021, 2021->2022, 2022->2023, 2023->2024
+    assert wins[1]["window_count"] == 2  # 2020->2023, 2021->2024
+    assert wins[2]["window_count"] == 0  # 5Y doesn't fit in 4Y
+
+    agg_1y = wins[0]["aggregates"]["acquirers_multiple"]
+    cagrs_1y = [rw["strategies"]["acquirers_multiple"]["cagr_pct"] for rw in wins[0]["rolling_windows"]]
+    assert agg_1y["positive_cagr_count"] == 4
+    assert agg_1y["win_rate_pct"] == 100.0
+    assert agg_1y["mean_cagr_pct"] == pytest.approx(float(np.mean(cagrs_1y)), abs=1e-3)
+    assert agg_1y["median_cagr_pct"] == pytest.approx(float(np.median(cagrs_1y)), abs=1e-3)
+    assert agg_1y["min_cagr_pct"] == pytest.approx(min(cagrs_1y), abs=1e-3)
+    assert agg_1y["max_cagr_pct"] == pytest.approx(max(cagrs_1y), abs=1e-3)
