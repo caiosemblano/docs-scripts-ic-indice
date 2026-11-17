@@ -136,6 +136,7 @@ class PerformanceSummarySchema(BaseModel):
     max_drawdown_pct: float
     sharpe_ratio: float | None
     rebalances_count: int
+    skipped_rebalances: int = 0
 
 
 class StrategyResultSchema(BaseModel):
@@ -199,6 +200,13 @@ class RollingStrategyAggregateSchema(BaseModel):
     worst_max_drawdown_pct: float
 
 
+class SkippedWindowSchema(BaseModel):
+    label: str
+    requested_start_date: str
+    requested_end_date: str
+    reason: str
+
+
 class WindowComparisonEntrySchema(BaseModel):
     window_years: int
     window_count: int
@@ -206,6 +214,7 @@ class WindowComparisonEntrySchema(BaseModel):
     base_end_date: str
     aggregates: dict[str, RollingStrategyAggregateSchema]
     rolling_windows: list[RollingSubWindowSchema]
+    skipped_windows: list[SkippedWindowSchema] = Field(default_factory=list)
     error: str | None = None
 
 
